@@ -1,7 +1,7 @@
 import { app, BrowserWindow, ipcMain, IpcMainEvent, Menu, screen } from 'electron'
 import { join } from 'path'
 import { is } from '@electron-toolkit/utils'
-import { disconnectRgbDevices, setRgbColor } from './services/RgbService'
+import { disconnectAllDevices, getStreamDeck, setAllDevicesSolidColor } from './services/DeviceManager'
 
 let mainWindow: BrowserWindow
 
@@ -57,7 +57,7 @@ app.on('window-all-closed', () => {
 })
 
 app.on('before-quit', async () => {
-  await disconnectRgbDevices()
+  await disconnectAllDevices()
 })
 
 ipcMain.on('setIgnoreMouseEvents', (event: IpcMainEvent, ignore: boolean) => {
@@ -66,5 +66,25 @@ ipcMain.on('setIgnoreMouseEvents', (event: IpcMainEvent, ignore: boolean) => {
 })
 
 ipcMain.handle('setRgbColor', async (_event, r: number, g: number, b: number) => {
-  await setRgbColor(r, g, b)
+  await setAllDevicesSolidColor(r, g, b)
+})
+
+ipcMain.handle('streamDeck:fillKeyColor', async (_event, keyIndex: number, r: number, g: number, b: number) => {
+  const deck = await getStreamDeck()
+  await deck?.fillKeyColor(keyIndex, r, g, b)
+})
+
+ipcMain.handle('streamDeck:fillKeyImage', async (_event, keyIndex: number, imageBuffer: Buffer) => {
+  const deck = await getStreamDeck()
+  await deck?.fillKeyImage(keyIndex, imageBuffer)
+})
+
+ipcMain.handle('streamDeck:clearPanel', async () => {
+  const deck = await getStreamDeck()
+  await deck?.clearPanel()
+})
+
+ipcMain.handle('streamDeck:setBrightness', async (_event, percentage: number) => {
+  const deck = await getStreamDeck()
+  await deck?.setBrightness(percentage)
 })

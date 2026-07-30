@@ -1,11 +1,12 @@
 import { HidppDevice } from './HidppDevice'
+import { LightingService } from '../services/LightingService'
 
 export interface HardcodedCluster {
     index: number
     staticEffectIdx: number
 }
 
-export abstract class RgbEffectsController {
+export abstract class RgbEffectsController implements LightingService {
     protected constructor(
         protected readonly hidpp: HidppDevice,
         protected readonly featIdx: number,
@@ -18,7 +19,7 @@ export abstract class RgbEffectsController {
 
     protected abstract swControlRequest(): number[]
 
-    async setColor(r: number, g: number, b: number): Promise<void> {
+    async setSolidColor(r: number, g: number, b: number): Promise<void> {
         await this.hidpp.sendAndReceive(this.featIdx, this.fnSetSwControl, this.swControlRequest())
 
         for (const cluster of this.clusters) {
