@@ -1,7 +1,8 @@
 import { app, BrowserWindow, ipcMain, IpcMainEvent, Menu, screen } from 'electron'
 import { join } from 'path'
 import { is } from '@electron-toolkit/utils'
-import { disconnectAllDevices, getStreamDeck, setAllDevicesSolidColor } from './services/DeviceManager'
+import { disconnectAllDevices, getStreamDeck, setAllDevicesSolidColor, setLedStripSolidColor } from './services/DeviceManager'
+import { askClaude, stopClaude } from './services/ClaudeService'
 
 let mainWindow: BrowserWindow
 
@@ -31,6 +32,12 @@ function createWindow(): void {
     mainWindow.setIgnoreMouseEvents(true, { forward: true })
   })
 
+  mainWindow.webContents.on('before-input-event', (_event, input) => {
+    if (input.key === 'F12' && input.type === 'keyDown') {
+      mainWindow.webContents.toggleDevTools()
+    }
+  })
+
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
     mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
   } else {
@@ -58,6 +65,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', async () => {
   await disconnectAllDevices()
+  stopClaude()
 })
 
 ipcMain.on('setIgnoreMouseEvents', (event: IpcMainEvent, ignore: boolean) => {
@@ -67,6 +75,10 @@ ipcMain.on('setIgnoreMouseEvents', (event: IpcMainEvent, ignore: boolean) => {
 
 ipcMain.handle('setRgbColor', async (_event, r: number, g: number, b: number) => {
   await setAllDevicesSolidColor(r, g, b)
+})
+
+ipcMain.handle('setLedStripColor', async (_event, r: number, g: number, b: number) => {
+  await setLedStripSolidColor(r, g, b)
 })
 
 ipcMain.handle('streamDeck:fillKeyColor', async (_event, keyIndex: number, r: number, g: number, b: number) => {
@@ -87,4 +99,8 @@ ipcMain.handle('streamDeck:clearPanel', async () => {
 ipcMain.handle('streamDeck:setBrightness', async (_event, percentage: number) => {
   const deck = await getStreamDeck()
   await deck?.setBrightness(percentage)
+})
+
+ipcMain.handle('askClaude', async (_event, prompt: string) => {
+  return askClaude(prompt)
 })
