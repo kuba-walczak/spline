@@ -1,0 +1,37 @@
+@import '../styles/tokens.css';
+
+html,
+body,
+#root {
+  margin: 0;
+  height: 100%;
+  background: #1a1a19;
+  overflow: hidden;
+}
+
+a {
+  color: var(--text-link);
+  text-decoration: none;
+}
+a:hover {
+  color: var(--text-link-hover);
+}
+
+.chatscroll::-webkit-scrollbar {
+  width: 10px;
+}
+.chatscroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+.chatscroll::-webkit-scrollbar-thumb {
+  background: #313130;
+  border-radius: 8px;
+  border: 3px solid transparent;
+  background-clip: content-box;
+}
+
+#chatsidebar aside {
+  box-sizing: border-box;
+  height: 100%;
+  min-height: 0;
+}

@@ -1,0 +1,235 @@
+/* Claude app design system — tokens.
+   Imported verbatim from the design project
+   _ds/claude-app-design-system-617c3b8b-c2a1-4632-8ba2-b8bc8c60b57b/tokens/*.css
+   (fonts, colors, typography, spacing, radius, elevation, motion, base). */
+
+/* --- fonts ---------------------------------------------------------------
+   SUBSTITUTIONS — the source app uses licensed faces:
+     display serif  Copernicus  ->  Newsreader        (Google Fonts)
+     ui sans        Styrene B   ->  Instrument Sans   (Google Fonts)
+     mono           unverified  ->  JetBrains Mono    (Google Fonts) */
+@import url("https://fonts.googleapis.com/css2?family=Instrument+Sans:ital,wght@0,400..700;1,400..700&family=Newsreader:ital,opsz,wght@0,6..72,300..700;1,6..72,300..700&family=JetBrains+Mono:wght@400;500&display=swap");
+
+/* --- colors --------------------------------------------------------------
+   A single warm-graphite dark theme: neutrals carry a faint yellow-green
+   cast (R=G>B), text is bone rather than white, one chromatic accent. */
+:root {
+  /* base: warm graphite ramp, darkest -> lightest */
+  --graphite-000: #111111; /* deep inset well (segmented track inside the composer) */
+  --graphite-100: #181817; /* sidebar plate */
+  --graphite-200: #1a1a19; /* app canvas */
+  --graphite-300: #262625; /* subtle surface: segmented tracks, badges */
+  --graphite-400: #292929; /* inset thumb */
+  --graphite-500: #30302f; /* row hover / selected */
+  --graphite-600: #313130; /* secondary control fill + hairline border */
+  --graphite-700: #383835; /* raised input surface (composer) */
+  --graphite-800: #3c3c3b; /* active segmented thumb */
+
+  /* base: bone text ramp */
+  --bone-000: #ffffff;
+  --bone-200: #c3c2b7;
+  --bone-400: #898781;
+  --bone-500: #73716c;
+  --ink-900: #0b0b0b;
+
+  /* base: accent — the single brand chroma */
+  --coral-500: #d97757;
+  --coral-400: oklch(from var(--coral-500) calc(l + 0.06) c h);
+  --coral-600: oklch(from var(--coral-500) calc(l - 0.07) c h);
+  --coral-soft: oklch(from var(--coral-500) l calc(c * 0.28) h / 0.18);
+
+  /* semantic: surfaces */
+  --surface-app: var(--graphite-200);
+  --surface-sidebar: var(--graphite-100);
+  --surface-subtle: var(--graphite-300);
+  --surface-inset: var(--graphite-000);
+  --surface-raised: var(--graphite-700);
+  --surface-hover: var(--graphite-500);
+  --surface-selected: var(--graphite-500);
+  --surface-control: var(--graphite-600);
+  --surface-control-hover: var(--graphite-800);
+  --surface-thumb: var(--graphite-800);
+  --surface-thumb-inset: var(--graphite-400);
+  --surface-inverse: var(--bone-000);
+
+  /* semantic: text */
+  --text-primary: var(--bone-000);
+  --text-body: var(--bone-200);
+  --text-muted: var(--bone-400);
+  --text-faint: var(--bone-500);
+  --text-inverse: var(--ink-900);
+  --text-accent: var(--coral-500);
+  --text-link: var(--bone-000);
+  --text-link-hover: var(--coral-500);
+
+  /* semantic: lines */
+  --border-default: var(--graphite-600);
+  --border-subtle: var(--graphite-300);
+  --border-strong: var(--graphite-800);
+  --border-inset: #3a3a3a;
+
+  /* semantic: accent */
+  --accent: var(--coral-500);
+  --accent-hover: var(--coral-400);
+  --accent-press: var(--coral-600);
+  --accent-wash: var(--coral-soft);
+}
+
+/* --- typography ---------------------------------------------------------- */
+:root {
+  --font-display: "Newsreader", Georgia, "Times New Roman", serif;
+  --font-sans: "Instrument Sans", -apple-system, "Segoe UI", system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --text-2xs: 11px;
+  --text-xs: 12px;
+  --text-sm: 13px;
+  --text-base: 14px; /* the workhorse: nav, body, buttons, card copy */
+  --text-md: 15px; /* composer input */
+  --text-lg: 18px;
+  --text-title: 26px;
+  --text-display: 42px;
+
+  --leading-tight: 1.15;
+  --leading-snug: 1.3;
+  --leading-normal: 1.45;
+  --leading-relaxed: 1.6;
+
+  --weight-regular: 400;
+  --weight-medium: 500;
+  --weight-semibold: 600;
+  --weight-display: 400;
+
+  --tracking-tight: -0.01em;
+  --tracking-normal: 0;
+  --tracking-display: -0.015em;
+
+  --type-display: var(--weight-display) var(--text-display) / var(--leading-tight) var(--font-display);
+  --type-title: var(--weight-display) var(--text-title) / var(--leading-tight) var(--font-display);
+  --type-body: var(--weight-regular) var(--text-base) / var(--leading-normal) var(--font-sans);
+  --type-body-strong: var(--weight-semibold) var(--text-base) / var(--leading-normal) var(--font-sans);
+  --type-label: var(--weight-medium) var(--text-base) / 1 var(--font-sans);
+  --type-meta: var(--weight-regular) var(--text-sm) / 1.3 var(--font-sans);
+  --type-section: var(--weight-medium) var(--text-xs) / 1 var(--font-sans);
+}
+
+/* --- spacing -------------------------------------------------------------
+   4px rhythm with a few measured exceptions kept literal. */
+:root {
+  --space-0: 0px;
+  --space-1: 2px;
+  --space-2: 4px;
+  --space-3: 6px;
+  --space-4: 8px;
+  --space-5: 10px;
+  --space-6: 12px;
+  --space-7: 16px;
+  --space-8: 20px;
+  --space-9: 22px; /* composer horizontal inset (measured) */
+  --space-10: 25px; /* project-grid gutter (measured) */
+  --space-11: 32px;
+  --space-12: 40px;
+  --space-13: 56px;
+  --space-14: 80px;
+
+  --sidebar-width: 308px;
+  --sidebar-inset: 8px;
+  --titlebar-height: 36px;
+  --row-height: 26px;
+  --row-gap: 1px;
+  --control-height: 32px;
+  --control-height-sm: 28px;
+  --composer-width: 672px;
+  --composer-height: 120px;
+  --container: 832px;
+  --icon-size: 16px;
+  --icon-size-sm: 14px;
+}
+
+/* --- radius --------------------------------------------------------------- */
+:root {
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 8px;
+  --radius-lg: 10px;
+  --radius-xl: 14px;
+  --radius-full: 999px;
+}
+
+/* --- elevation -----------------------------------------------------------
+   Depth is communicated by surface lightness, not by shadow. */
+:root {
+  --shadow-none: none;
+  --shadow-raised: none;
+  --shadow-overlay: 0 8px 24px rgba(0, 0, 0, 0.44), 0 2px 6px rgba(0, 0, 0, 0.32);
+  --shadow-popover: 0 4px 14px rgba(0, 0, 0, 0.4);
+  --ring-focus: 0 0 0 2px var(--surface-app), 0 0 0 4px var(--bone-400);
+  --ring-accent: 0 0 0 2px var(--surface-app), 0 0 0 4px var(--coral-500);
+  --hairline: 1px solid var(--border-default);
+}
+
+/* --- motion --------------------------------------------------------------- */
+:root {
+  --duration-instant: 80ms;
+  --duration-fast: 120ms;
+  --duration-normal: 180ms;
+  --duration-slow: 260ms;
+  --ease-standard: cubic-bezier(0.2, 0, 0.2, 1);
+  --ease-out: cubic-bezier(0, 0, 0.2, 1);
+  --ease-in-out: cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-control: background-color var(--duration-fast) var(--ease-standard),
+    color var(--duration-fast) var(--ease-standard), border-color var(--duration-fast) var(--ease-standard);
+}
+
+/* --- base ---------------------------------------------------------------- */
+:root {
+  color-scheme: dark;
+}
+html {
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+body {
+  margin: 0;
+  background: var(--surface-app);
+  color: var(--text-body);
+  font: var(--type-body);
+  letter-spacing: var(--tracking-tight);
+}
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  font-weight: var(--weight-display);
+  color: var(--text-primary);
+  letter-spacing: var(--tracking-display);
+  margin: 0;
+}
+h1 {
+  font-size: var(--text-display);
+  line-height: var(--leading-tight);
+}
+h2 {
+  font-size: var(--text-title);
+  line-height: var(--leading-tight);
+}
+h3 {
+  font-size: var(--text-lg);
+  line-height: var(--leading-snug);
+}
+p {
+  margin: 0 0 var(--space-6);
+}
+code,
+pre {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+}
+::selection {
+  background: var(--accent-wash);
+  color: var(--text-primary);
+}
+*:focus-visible {
+  outline: none;
+  box-shadow: var(--ring-focus);
+}

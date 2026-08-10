@@ -8,6 +8,7 @@ declare global {
       setRgbColor: (r: number, g: number, b: number) => Promise<void>
       setLedStripColor: (r: number, g: number, b: number) => Promise<void>
       askClaude: (prompt: string) => Promise<string>
+      openChatWindow: () => Promise<void>
     }
   }
 }

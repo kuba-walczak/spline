@@ -3,8 +3,62 @@ import { join } from 'path'
 import { is } from '@electron-toolkit/utils'
 import { disconnectAllDevices, getStreamDeck, setAllDevicesSolidColor, setLedStripSolidColor } from './services/DeviceManager'
 import { askClaude, stopClaude } from './services/ClaudeService'
+import { startWakeWordListener, stopWakeWordListener } from './services/WakeWordService'
 
 let mainWindow: BrowserWindow
+let chatWindow: BrowserWindow | null = null
+
+function loadRenderer(window: BrowserWindow, page: string): void {
+  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
+    window.loadURL(`${process.env['ELECTRON_RENDERER_URL']}/${page}`)
+  } else {
+    window.loadFile(join(__dirname, `../renderer/${page}`))
+  }
+}
+
+function createChatWindow(): BrowserWindow {
+  if (chatWindow && !chatWindow.isDestroyed()) {
+    chatWindow.show()
+    chatWindow.focus()
+    return chatWindow
+  }
+
+  chatWindow = new BrowserWindow({
+    title: 'Claude',
+    show: false,
+    width: 1280,
+    height: 860,
+    minWidth: 720,
+    minHeight: 480,
+    backgroundColor: '#1a1a19',
+    // Frameless, but keep the native window controls overlaid on the 52px header.
+    titleBarStyle: 'hidden',
+    titleBarOverlay: {
+      color: '#1a1a19',
+      symbolColor: '#c3c2b7',
+      height: 52
+    },
+    webPreferences: {
+      preload: join(__dirname, '../preload/index.js'),
+      sandbox: false
+    }
+  })
+
+  chatWindow.once('ready-to-show', () => chatWindow?.show())
+  chatWindow.on('closed', () => {
+    chatWindow = null
+  })
+
+  chatWindow.webContents.on('before-input-event', (_event, input) => {
+    if (input.key === 'F12' && input.type === 'keyDown') {
+      chatWindow?.webContents.toggleDevTools()
+    }
+  })
+
+  loadRenderer(chatWindow, 'chat.html')
+
+  return chatWindow
+}
 
 function createWindow(): void {
   const { x, y, width, height } = screen.getPrimaryDisplay().bounds
@@ -30,6 +84,25 @@ function createWindow(): void {
     mainWindow.showInactive()
     mainWindow.setAlwaysOnTop(true, 'floating')
     mainWindow.setIgnoreMouseEvents(true, { forward: true })
+
+    startWakeWordListener({
+      onWake: () => {
+        void setLedStripSolidColor(255, 0, 0)
+      },
+      onTranscript: async (text) => {
+        try {
+          if (text.trim()) {
+            console.log(text)
+            const result = await askClaude(text)
+            console.log(result)
+          }
+        } catch (error) {
+          console.error('[wakeword] askClaude failed:', error)
+        } finally {
+          await setLedStripSolidColor(0, 0, 0)
+        }
+      }
+    })
   })
 
   mainWindow.webContents.on('before-input-event', (_event, input) => {
@@ -38,21 +111,19 @@ function createWindow(): void {
     }
   })
 
-  if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
-    mainWindow.loadURL(process.env['ELECTRON_RENDERER_URL'])
-  } else {
-    mainWindow.loadFile(join(__dirname, '../renderer/index.html'))
-  }
+  loadRenderer(mainWindow, 'index.html')
 }
 
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null)
 
   createWindow()
+  createChatWindow()
 
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) {
       createWindow()
+      createChatWindow()
     }
   })
 })
@@ -66,6 +137,7 @@ app.on('window-all-closed', () => {
 app.on('before-quit', async () => {
   await disconnectAllDevices()
   stopClaude()
+  stopWakeWordListener()
 })
 
 ipcMain.on('setIgnoreMouseEvents', (event: IpcMainEvent, ignore: boolean) => {
@@ -103,4 +175,8 @@ ipcMain.handle('streamDeck:setBrightness', async (_event, percentage: number) =>
 
 ipcMain.handle('askClaude', async (_event, prompt: string) => {
   return askClaude(prompt)
+})
+
+ipcMain.handle('chat:open', () => {
+  createChatWindow()
 })

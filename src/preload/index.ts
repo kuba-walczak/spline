@@ -13,7 +13,8 @@ const api = {
     clearPanel: () => ipcRenderer.invoke('streamDeck:clearPanel') as Promise<void>,
     setBrightness: (percentage: number) => ipcRenderer.invoke('streamDeck:setBrightness', percentage) as Promise<void>
   },
-  askClaude: (prompt: string) => ipcRenderer.invoke('askClaude', prompt) as Promise<string>
+  askClaude: (prompt: string) => ipcRenderer.invoke('askClaude', prompt) as Promise<string>,
+  openChatWindow: () => ipcRenderer.invoke('chat:open') as Promise<void>
 }
 
 if (process.contextIsolated) {

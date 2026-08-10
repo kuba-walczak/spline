@@ -50,6 +50,10 @@ export async function setAllDevicesSolidColor(r: number, g: number, b: number): 
     await Promise.all(devices.map((handle) => applySolidColor(handle, r, g, b)))
 }
 
+export async function setLedStripSolidColor(r: number, g: number, b: number): Promise<void> {
+    await applySolidColor(sacn, r, g, b)
+}
+
 export function getStreamDeck(): Promise<StreamDeckController | null> {
     return getDevice(streamDeck)
 }

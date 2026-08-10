@@ -6,12 +6,28 @@ import autoprefixer from 'autoprefixer'
 
 export default defineConfig({
   main: {
+    build: {
+      rollupOptions: {
+        input: {
+          index: resolve('src/main/index.ts'),
+          wakeWordWorker: resolve('src/main/services/wakeWordWorker.ts')
+        }
+      }
+    },
     plugins: [externalizeDepsPlugin()]
   },
   preload: {
     plugins: [externalizeDepsPlugin()]
   },
   renderer: {
+    build: {
+      rollupOptions: {
+        input: {
+          index: resolve('src/renderer/index.html'),
+          chat: resolve('src/renderer/chat.html')
+        }
+      }
+    },
     css: {
       postcss: {
         plugins: [
