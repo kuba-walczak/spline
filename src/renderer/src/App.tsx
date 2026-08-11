@@ -3,7 +3,6 @@ import { useRef, useState } from 'react'
 export default function App() {
   const [swatchColor, setSwatchColor] = useState('rgb(0, 0, 0)')
   const [micActive, setMicActive] = useState(false)
-  const [claudePrompt, setClaudePrompt] = useState('')
 
   const audioContextRef = useRef<AudioContext | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
@@ -78,11 +77,6 @@ export default function App() {
     else void startMic()
   }
 
-  const askClaude = async (): Promise<void> => {
-    const result = await window.api.askClaude(claudePrompt)
-    console.log(result)
-  }
-
   return (
     <div className="relative h-full w-full">
       <div
@@ -112,23 +106,6 @@ export default function App() {
         onMouseLeave={() => window.api.setIgnoreMouseEvents(true)}
       >
         {micActive ? 'Stop Mic' : 'Start Mic'}
-      </button>
-      <input
-        type="text"
-        className="left-4 top-4 rounded-md bg-black/60 px-4 py-2 text-sm font-medium text-white placeholder:text-white/50"
-        placeholder="Ask Claude..."
-        value={claudePrompt}
-        onChange={(e) => setClaudePrompt(e.target.value)}
-        onMouseEnter={() => window.api.setIgnoreMouseEvents(false)}
-        onMouseLeave={() => window.api.setIgnoreMouseEvents(true)}
-      />
-      <button
-        className="left-4 top-4 rounded-md bg-black/60 px-4 py-2 text-sm font-medium text-white hover:bg-black/80"
-        onClick={() => void askClaude()}
-        onMouseEnter={() => window.api.setIgnoreMouseEvents(false)}
-        onMouseLeave={() => window.api.setIgnoreMouseEvents(true)}
-      >
-        Ask Claude
       </button>
     </div>
   )

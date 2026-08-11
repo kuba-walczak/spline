@@ -2,6 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent, ReactElement } from 'react'
 import { Composer } from '@/components/ui/composer'
 import { Icon } from '@/components/ui/icon'
+import { IconButton } from '@/components/ui/icon-button'
 import { Sidebar } from './Sidebar'
 
 /* Implementation of `Chat Window.dc.html` from the Claude app design system.
@@ -17,6 +18,8 @@ interface Conversation {
   id: number
   title: string
   messages: Message[]
+  sourceId?: string
+  loaded?: boolean
 }
 
 const REPLIES = [
@@ -53,17 +56,55 @@ export default function ChatWindow({
   onSend
 }: ChatWindowProps): ReactElement {
   const [conversations, setConversations] = useState<Conversation[]>([])
+  const [notionChats, setNotionChats] = useState<Conversation[]>([])
   const [activeId, setActiveId] = useState<number | null>(null)
   const [draft, setDraft] = useState('')
   const [streamingId, setStreamingId] = useState<number | null>(null)
+  const [refreshingChatLog, setRefreshingChatLog] = useState(false)
+  const [bumpingLastActive, setBumpingLastActive] = useState(false)
 
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const nextConversationId = useRef(1)
   const nextMessageId = useRef(1)
+  const nextNotionId = useRef(-1)
+  const notionIdBySourceId = useRef(new Map<string, number>())
   const replyIndex = useRef(0)
   const timer = useRef<ReturnType<typeof setInterval> | null>(null)
 
-  const active = conversations.find((c) => c.id === activeId) ?? null
+  function refreshChatLog(): void {
+    setRefreshingChatLog(true)
+    window.api
+      .getChatLog()
+      .then((entries) => {
+        setNotionChats((prev) => {
+          const bySourceId = new Map(prev.map((c) => [c.sourceId, c]))
+          return entries.map((entry) => {
+            const existing = bySourceId.get(entry.id)
+            let id = notionIdBySourceId.current.get(entry.id)
+            if (id === undefined) {
+              id = nextNotionId.current--
+              notionIdBySourceId.current.set(entry.id, id)
+            }
+            return {
+              id,
+              title: entry.name,
+              messages: existing?.messages ?? [],
+              loaded: existing?.loaded,
+              sourceId: entry.id
+            }
+          })
+        })
+      })
+      .catch((error) => console.error('[chat] getChatLog failed:', error))
+      .finally(() => setRefreshingChatLog(false))
+  }
+
+  useEffect(() => {
+    refreshChatLog()
+  }, [])
+
+  const allConversations = notionChats.concat(conversations)
+  const active = allConversations.find((c) => c.id === activeId) ?? null
   const messages = active ? active.messages : []
 
   useLayoutEffect(() => {
@@ -79,7 +120,46 @@ export default function ChatWindow({
   }
 
   function patch(id: number, fn: (c: Conversation) => Conversation): void {
-    setConversations((prev) => prev.map((c) => (c.id === id ? fn(c) : c)))
+    setConversations((prev) => (prev.some((c) => c.id === id) ? prev.map((c) => (c.id === id ? fn(c) : c)) : prev))
+    setNotionChats((prev) => (prev.some((c) => c.id === id) ? prev.map((c) => (c.id === id ? fn(c) : c)) : prev))
+  }
+
+  function loadTranscript(chat: Conversation): void {
+    if (!chat.sourceId || chat.loaded) return
+
+    patch(chat.id, (c) => ({ ...c, loaded: true }))
+    window.api
+      .getChatTranscript(chat.sourceId)
+      .then((rows) => {
+        const loadedMessages = rows.map((row) => ({ id: nextMessageId.current++, role: row.role, text: row.text }))
+        patch(chat.id, (c) => ({ ...c, messages: loadedMessages }))
+      })
+      .catch((error) => {
+        console.error('[chat] getChatTranscript failed:', error)
+        patch(chat.id, (c) => ({ ...c, loaded: false }))
+      })
+  }
+
+  async function bumpLastActiveIfChanged(): Promise<void> {
+    if (!active?.sourceId || bumpingLastActive || streamingId === active.id) return
+    const sourceId = active.sourceId
+    if (active.messages.length === 0) return
+
+    setBumpingLastActive(true)
+    try {
+      const remote = await window.api.getChatTranscript(sourceId)
+      const newMessages = active.messages.slice(remote.length).map((m) => ({ role: m.role, text: m.text }))
+
+      if (newMessages.length > 0) {
+        await window.api.appendMessages(sourceId, newMessages)
+        await window.api.updateLastActive(sourceId)
+        refreshChatLog()
+      }
+    } catch (error) {
+      console.error('[chat] bumpLastActiveIfChanged failed:', error)
+    } finally {
+      setBumpingLastActive(false)
+    }
   }
 
   function createConversation(): number {
@@ -92,6 +172,8 @@ export default function ChatWindow({
 
   function selectConversation(id: number): void {
     setActiveId(id)
+    const chat = notionChats.find((c) => c.id === id)
+    if (chat) loadTranscript(chat)
   }
 
   function stream(conversationId: number, botId: number, full: string): void {
@@ -196,7 +278,7 @@ export default function ChatWindow({
           }}
         >
           <Sidebar
-            conversations={conversations}
+            conversations={allConversations}
             activeId={activeId}
             onSelect={selectConversation}
             onNew={createConversation}
@@ -242,6 +324,17 @@ export default function ChatWindow({
               {active ? active.title : 'No conversation'}
             </span>
           </div>
+          {active?.sourceId ? (
+            <div style={{ WebkitAppRegion: 'no-drag' } as CSSProperties}>
+              <IconButton
+                icon="refresh-cw"
+                label="Sync new messages to Notion"
+                size="sm"
+                onClick={() => void bumpLastActiveIfChanged()}
+                disabled={bumpingLastActive || refreshingChatLog}
+              />
+            </div>
+          ) : null}
         </header>
 
         <div ref={scrollRef} className="chatscroll" style={{ flex: '1 1 auto', overflowY: 'auto', overflowX: 'hidden' }}>

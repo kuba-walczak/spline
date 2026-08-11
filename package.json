@@ -19,6 +19,7 @@
     "@elgato-stream-deck/node": "^7.6.3",
     "@picovoice/pvrecorder-node": "^1.2.9",
     "clsx": "^2.1.1",
+    "dotenv": "^17.4.2",
     "lucide-react": "^1.31.0",
     "node-hid": "^3.4.0",
     "sacn": "^4.6.2",

@@ -9,6 +9,10 @@ declare global {
       setLedStripColor: (r: number, g: number, b: number) => Promise<void>
       askClaude: (prompt: string) => Promise<string>
       openChatWindow: () => Promise<void>
+      getChatLog: () => Promise<Array<{ id: string; name: string; lastActive: string | null }>>
+      getChatTranscript: (pageId: string) => Promise<Array<{ role: 'user' | 'assistant'; text: string }>>
+      updateLastActive: (pageId: string) => Promise<void>
+      appendMessages: (pageId: string, messages: Array<{ role: 'user' | 'assistant'; text: string }>) => Promise<void>
     }
   }
 }

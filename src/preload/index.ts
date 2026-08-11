@@ -14,7 +14,18 @@ const api = {
     setBrightness: (percentage: number) => ipcRenderer.invoke('streamDeck:setBrightness', percentage) as Promise<void>
   },
   askClaude: (prompt: string) => ipcRenderer.invoke('askClaude', prompt) as Promise<string>,
-  openChatWindow: () => ipcRenderer.invoke('chat:open') as Promise<void>
+  openChatWindow: () => ipcRenderer.invoke('chat:open') as Promise<void>,
+  getChatLog: () =>
+    ipcRenderer.invoke('notion:getChatLog') as Promise<
+      Array<{ id: string; name: string; lastActive: string | null }>
+    >,
+  getChatTranscript: (pageId: string) =>
+    ipcRenderer.invoke('notion:getChatTranscript', pageId) as Promise<
+      Array<{ role: 'user' | 'assistant'; text: string }>
+    >,
+  updateLastActive: (pageId: string) => ipcRenderer.invoke('notion:updateLastActive', pageId) as Promise<void>,
+  appendMessages: (pageId: string, messages: Array<{ role: 'user' | 'assistant'; text: string }>) =>
+    ipcRenderer.invoke('notion:appendMessages', pageId, messages) as Promise<void>
 }
 
 if (process.contextIsolated) {

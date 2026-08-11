@@ -17,6 +17,7 @@ import {
   Mic,
   Palette,
   Plus,
+  RefreshCw,
   Search,
   SlidersHorizontal,
   X
@@ -43,6 +44,7 @@ const ICONS: Record<string, LucideIcon> = {
   mic: Mic,
   palette: Palette,
   plus: Plus,
+  'refresh-cw': RefreshCw,
   search: Search,
   'sliders-horizontal': SlidersHorizontal,
   x: X

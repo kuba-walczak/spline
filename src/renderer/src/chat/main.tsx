@@ -5,6 +5,6 @@ import './chat.css'
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <ChatWindow />
+    <ChatWindow onSend={window.api.askClaude} />
   </StrictMode>
 )

@@ -3,6 +3,13 @@ import { join } from 'path'
 import { is } from '@electron-toolkit/utils'
 import { disconnectAllDevices, getStreamDeck, setAllDevicesSolidColor, setLedStripSolidColor } from './services/DeviceManager'
 import { askClaude, stopClaude } from './services/ClaudeService'
+import {
+  appendMessages,
+  fetchChatLog,
+  fetchChatTranscript,
+  updateLastActive,
+  type ChatTranscriptMessage
+} from './services/NotionService'
 import { startWakeWordListener, stopWakeWordListener } from './services/WakeWordService'
 
 let mainWindow: BrowserWindow
@@ -47,6 +54,12 @@ function createChatWindow(): BrowserWindow {
   chatWindow.once('ready-to-show', () => chatWindow?.show())
   chatWindow.on('closed', () => {
     chatWindow = null
+  })
+  chatWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
+    console.log(`[chatWindow console:${level}] ${message} (${sourceId}:${line})`)
+  })
+  chatWindow.webContents.on('render-process-gone', (_event, details) => {
+    console.error('[chatWindow] render process gone:', details)
   })
 
   chatWindow.webContents.on('before-input-event', (_event, input) => {
@@ -179,4 +192,30 @@ ipcMain.handle('askClaude', async (_event, prompt: string) => {
 
 ipcMain.handle('chat:open', () => {
   createChatWindow()
+})
+
+ipcMain.handle('notion:getChatLog', async () => {
+  try {
+    return await fetchChatLog()
+  } catch (error) {
+    console.error('[main] notion:getChatLog failed:', error)
+    return []
+  }
+})
+
+ipcMain.handle('notion:getChatTranscript', async (_event, pageId: string) => {
+  try {
+    return await fetchChatTranscript(pageId)
+  } catch (error) {
+    console.error('[main] notion:getChatTranscript failed:', error)
+    return []
+  }
+})
+
+ipcMain.handle('notion:updateLastActive', async (_event, pageId: string) => {
+  await updateLastActive(pageId)
+})
+
+ipcMain.handle('notion:appendMessages', async (_event, pageId: string, messages: ChatTranscriptMessage[]) => {
+  await appendMessages(pageId, messages)
 })

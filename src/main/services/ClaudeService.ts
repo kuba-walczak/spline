@@ -6,8 +6,6 @@ import { tmpdir } from 'node:os'
 const noHooksSettingsPath = join(tmpdir(), 'jarvis-claude-settings.json')
 writeFileSync(noHooksSettingsPath, JSON.stringify({ hooks: {} }))
 
-const emptyMcpConfigPath = join(tmpdir(), 'jarvis-claude-mcp.json')
-writeFileSync(emptyMcpConfigPath, JSON.stringify({ mcpServers: {} }))
 
 interface ResultEvent {
     type: 'result'
@@ -46,13 +44,42 @@ function ensureProcess(): ChildProcessWithoutNullStreams {
         '-p',
         '--input-format', 'stream-json',
         '--output-format', 'stream-json',
-        '--allowedTools', 'WebSearch WebFetch',
+        '--allowedTools', [
+            'WebSearch',
+            'WebFetch',
+            'mcp__claude_ai_Notion__notion-convert-page-to-skill',
+            'mcp__claude_ai_Notion__notion-create-attachment',
+            'mcp__claude_ai_Notion__notion-create-comment',
+            'mcp__claude_ai_Notion__notion-create-database',
+            'mcp__claude_ai_Notion__notion-create-file-upload',
+            'mcp__claude_ai_Notion__notion-create-folder',
+            'mcp__claude_ai_Notion__notion-create-pages',
+            'mcp__claude_ai_Notion__notion-create-view',
+            'mcp__claude_ai_Notion__notion-download-attachment',
+            'mcp__claude_ai_Notion__notion-duplicate-page',
+            'mcp__claude_ai_Notion__notion-fetch',
+            'mcp__claude_ai_Notion__notion-get-async-task',
+            'mcp__claude_ai_Notion__notion-get-comments',
+            'mcp__claude_ai_Notion__notion-get-teams',
+            'mcp__claude_ai_Notion__notion-get-users',
+            'mcp__claude_ai_Notion__notion-list-favorite-pages',
+            'mcp__claude_ai_Notion__notion-list-private-pages',
+            'mcp__claude_ai_Notion__notion-list-recent-pages',
+            'mcp__claude_ai_Notion__notion-list-shared-pages',
+            'mcp__claude_ai_Notion__notion-move-pages',
+            'mcp__claude_ai_Notion__notion-query-data-sources',
+            'mcp__claude_ai_Notion__notion-query-database-view',
+            'mcp__claude_ai_Notion__notion-query-meeting-notes',
+            'mcp__claude_ai_Notion__notion-search',
+            'mcp__claude_ai_Notion__notion-search-agents',
+            'mcp__claude_ai_Notion__notion-update-data-source',
+            'mcp__claude_ai_Notion__notion-update-page',
+            'mcp__claude_ai_Notion__notion-update-view'
+        ].join(' '),
         '--verbose',
         '--model', 'sonnet',
         '--effort', 'medium',
-        '--settings', noHooksSettingsPath,
-        '--strict-mcp-config',
-        '--mcp-config', emptyMcpConfigPath
+        '--settings', noHooksSettingsPath
     ].map(quoteArg).join(' ')
 
     const proc = spawn(`claude ${args}`, { shell: true })
