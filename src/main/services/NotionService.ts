@@ -118,6 +118,37 @@ export async function appendMessages(pageId: string, messages: ChatTranscriptMes
     }
 }
 
+export async function createChatPage(name: string): Promise<string> {
+    const res = await fetch('https://api.notion.com/v1/pages', {
+        method: 'POST',
+        headers: headers(),
+        body: JSON.stringify({
+            parent: { type: 'data_source_id', data_source_id: CHAT_LOG_DATA_SOURCE_ID },
+            properties: {
+                Name: { title: [{ type: 'text', text: { content: name } }] },
+                'Last active': { date: { start: new Date().toISOString() } }
+            }
+        })
+    })
+
+    if (!res.ok) throw new Error(`Notion page create failed: ${res.status} ${await res.text()}`)
+
+    const data = (await res.json()) as { id: string }
+    return data.id
+}
+
+export async function updatePageTitle(pageId: string, name: string): Promise<void> {
+    const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+        method: 'PATCH',
+        headers: headers(),
+        body: JSON.stringify({
+            properties: { Name: { title: [{ type: 'text', text: { content: name } }] } }
+        })
+    })
+
+    if (!res.ok) throw new Error(`Notion page title update failed: ${res.status} ${await res.text()}`)
+}
+
 export async function updateLastActive(pageId: string): Promise<void> {
     const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
         method: 'PATCH',

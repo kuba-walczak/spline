@@ -1,6 +1,11 @@
 import { useRef, useState } from 'react'
+import type { ReactElement } from 'react'
 
-export default function App() {
+/* Debug controls for the LED strip / RGB devices, moved here from the
+   transparent overlay window (App.tsx) so they're reachable without the
+   click-through overlay. */
+
+export function DeviceDebug(): ReactElement {
   const [swatchColor, setSwatchColor] = useState('rgb(0, 0, 0)')
   const [micActive, setMicActive] = useState(false)
 
@@ -77,34 +82,35 @@ export default function App() {
     else void startMic()
   }
 
+  const buttonStyle: React.CSSProperties = {
+    borderRadius: 'var(--radius-md)',
+    border: 'none',
+    background: 'var(--surface-control)',
+    color: 'var(--text-primary)',
+    font: 'var(--type-meta)',
+    padding: '4px 8px',
+    cursor: 'pointer'
+  }
+
   return (
-    <div className="relative h-full w-full">
+    <div style={{ display: 'flex', alignItems: 'center', gap: 6, padding: '0 var(--sidebar-inset) 12px' }}>
       <div
-        className="absolute left-4 top-16 h-64 w-64 rounded-md border border-white/20"
-        style={{ backgroundColor: swatchColor }}
+        style={{
+          width: 16,
+          height: 16,
+          borderRadius: 4,
+          border: '1px solid var(--border-subtle)',
+          backgroundColor: swatchColor,
+          flex: '0 0 auto'
+        }}
       />
-      <button
-        className="left-4 top-4 rounded-md bg-black/60 px-4 py-2 text-sm font-medium text-white hover:bg-black/80"
-        onClick={() => setColor(255, 0, 0)}
-        onMouseEnter={() => window.api.setIgnoreMouseEvents(false)}
-        onMouseLeave={() => window.api.setIgnoreMouseEvents(true)}
-      >
+      <button style={buttonStyle} onClick={() => setColor(255, 0, 0)}>
         Red
       </button>
-      <button
-        className="left-4 top-4 rounded-md bg-black/60 px-4 py-2 text-sm font-medium text-white hover:bg-black/80"
-        onClick={() => setColor(0, 0, 255)}
-        onMouseEnter={() => window.api.setIgnoreMouseEvents(false)}
-        onMouseLeave={() => window.api.setIgnoreMouseEvents(true)}
-      >
+      <button style={buttonStyle} onClick={() => setColor(0, 0, 255)}>
         Blue
       </button>
-      <button
-        className="left-4 top-4 rounded-md bg-black/60 px-4 py-2 text-sm font-medium text-white hover:bg-black/80"
-        onClick={toggleMic}
-        onMouseEnter={() => window.api.setIgnoreMouseEvents(false)}
-        onMouseLeave={() => window.api.setIgnoreMouseEvents(true)}
-      >
+      <button style={buttonStyle} onClick={toggleMic}>
         {micActive ? 'Stop Mic' : 'Start Mic'}
       </button>
     </div>

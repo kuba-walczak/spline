@@ -23,7 +23,6 @@ export default defineConfig({
     build: {
       rollupOptions: {
         input: {
-          index: resolve('src/renderer/index.html'),
           chat: resolve('src/renderer/chat.html')
         }
       }

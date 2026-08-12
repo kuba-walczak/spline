@@ -1,18 +1,19 @@
-import { app, BrowserWindow, ipcMain, IpcMainEvent, Menu, screen } from 'electron'
+import { app, BrowserWindow, ipcMain, IpcMainEvent, Menu } from 'electron'
 import { join } from 'path'
 import { is } from '@electron-toolkit/utils'
 import { disconnectAllDevices, getStreamDeck, setAllDevicesSolidColor, setLedStripSolidColor } from './services/DeviceManager'
-import { askClaude, stopClaude } from './services/ClaudeService'
+import { askClaude, claudeEvents, stopClaude } from './services/ClaudeService'
 import {
   appendMessages,
+  createChatPage,
   fetchChatLog,
   fetchChatTranscript,
   updateLastActive,
+  updatePageTitle,
   type ChatTranscriptMessage
 } from './services/NotionService'
 import { startWakeWordListener, stopWakeWordListener } from './services/WakeWordService'
 
-let mainWindow: BrowserWindow
 let chatWindow: BrowserWindow | null = null
 
 function loadRenderer(window: BrowserWindow, page: string): void {
@@ -73,69 +74,39 @@ function createChatWindow(): BrowserWindow {
   return chatWindow
 }
 
-function createWindow(): void {
-  const { x, y, width, height } = screen.getPrimaryDisplay().bounds
-
-  mainWindow = new BrowserWindow({
-    title: 'jarvis',
-    show: false,
-    x,
-    y,
-    width,
-    height,
-    transparent: true,
-    frame: false,
-    alwaysOnTop: true,
-    backgroundColor: '#00000000',
-    webPreferences: {
-      preload: join(__dirname, '../preload/index.js'),
-      sandbox: false
-    }
-  })
-
-  mainWindow.once('ready-to-show', () => {
-    mainWindow.showInactive()
-    mainWindow.setAlwaysOnTop(true, 'floating')
-    mainWindow.setIgnoreMouseEvents(true, { forward: true })
-
-    startWakeWordListener({
-      onWake: () => {
-        void setLedStripSolidColor(255, 0, 0)
-      },
-      onTranscript: async (text) => {
-        try {
-          if (text.trim()) {
-            console.log(text)
-            const result = await askClaude(text)
-            console.log(result)
-          }
-        } catch (error) {
-          console.error('[wakeword] askClaude failed:', error)
-        } finally {
-          await setLedStripSolidColor(0, 0, 0)
+function startWakeWord(): void {
+  startWakeWordListener({
+    onWake: () => {
+      void setLedStripSolidColor(255, 0, 0)
+    },
+    onTranscript: async (text) => {
+      try {
+        if (text.trim()) {
+          console.log(text)
+          const result = await askClaude(text)
+          console.log(result)
         }
+      } catch (error) {
+        console.error('[wakeword] askClaude failed:', error)
+      } finally {
+        await setLedStripSolidColor(0, 0, 0)
       }
-    })
-  })
-
-  mainWindow.webContents.on('before-input-event', (_event, input) => {
-    if (input.key === 'F12' && input.type === 'keyDown') {
-      mainWindow.webContents.toggleDevTools()
     }
   })
-
-  loadRenderer(mainWindow, 'index.html')
 }
+
+claudeEvents.on('event', (event) => {
+  chatWindow?.webContents.send('claude:event', event)
+})
 
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null)
 
-  createWindow()
   createChatWindow()
+  startWakeWord()
 
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow()
       createChatWindow()
     }
   })
@@ -218,4 +189,12 @@ ipcMain.handle('notion:updateLastActive', async (_event, pageId: string) => {
 
 ipcMain.handle('notion:appendMessages', async (_event, pageId: string, messages: ChatTranscriptMessage[]) => {
   await appendMessages(pageId, messages)
+})
+
+ipcMain.handle('notion:createChatPage', async (_event, name: string) => {
+  return createChatPage(name)
+})
+
+ipcMain.handle('notion:updatePageTitle', async (_event, pageId: string, name: string) => {
+  await updatePageTitle(pageId, name)
 })

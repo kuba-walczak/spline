@@ -2,6 +2,7 @@ import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process'
 import { writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
+import { EventEmitter } from 'node:events'
 
 const noHooksSettingsPath = join(tmpdir(), 'jarvis-claude-settings.json')
 writeFileSync(noHooksSettingsPath, JSON.stringify({ hooks: {} }))
@@ -12,6 +13,9 @@ interface ResultEvent {
     is_error: boolean
     result?: string
 }
+
+/** Emits every parsed stream-json line (system/assistant/user/result), unfiltered. */
+export const claudeEvents = new EventEmitter()
 
 let child: ChildProcessWithoutNullStreams | null = null
 let buffer = ''
@@ -24,16 +28,19 @@ function quoteArg(arg: string): string {
 function handleLine(line: string): void {
     if (!line.trim()) return
 
-    const event = JSON.parse(line) as ResultEvent
+    const event = JSON.parse(line) as Record<string, unknown>
+    claudeEvents.emit('event', event)
+
     if (event.type !== 'result') return
 
+    const result = event as unknown as ResultEvent
     const pending = queue.shift()
     if (!pending) return
 
-    if (event.is_error) {
-        pending.reject(new Error(event.result ?? 'Claude request failed'))
+    if (result.is_error) {
+        pending.reject(new Error(result.result ?? 'Claude request failed'))
     } else {
-        pending.resolve(event.result ?? '')
+        pending.resolve(result.result ?? '')
     }
 }
 

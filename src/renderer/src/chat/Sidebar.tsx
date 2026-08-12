@@ -1,5 +1,5 @@
-import { useState } from 'react'
 import type { ReactElement } from 'react'
+import { DeviceDebug } from './DeviceDebug'
 import { IconButton } from '@/components/ui/icon-button'
 import { NavItem } from '@/components/ui/nav-item'
 import { SectionLabel } from '@/components/ui/section-label'
@@ -18,10 +18,12 @@ export interface SidebarProps {
   activeId: number | null
   onSelect: (id: number) => void
   onNew: () => void
+  /** Which top-level view the app is on. */
+  route: string
+  onNavigate: (route: string) => void
 }
 
-export function Sidebar({ conversations, activeId, onSelect, onNew }: SidebarProps): ReactElement {
-  const [tab, setTab] = useState('home')
+export function Sidebar({ conversations, activeId, onSelect, onNew, route, onNavigate }: SidebarProps): ReactElement {
 
   return (
     <aside
@@ -41,8 +43,8 @@ export function Sidebar({ conversations, activeId, onSelect, onNew }: SidebarPro
       <div style={{ padding: '0 var(--sidebar-inset) 12px' }}>
         <SegmentedControl
           fill
-          value={tab}
-          onChange={setTab}
+          value={route}
+          onChange={onNavigate}
           items={[
             { value: 'home', label: 'Home', icon: 'house' },
             { value: 'projects', label: 'Projects', icon: 'folder' }
@@ -92,6 +94,8 @@ export function Sidebar({ conversations, activeId, onSelect, onNew }: SidebarPro
           </div>
         )}
       </div>
+
+      <DeviceDebug />
     </aside>
   )
 }

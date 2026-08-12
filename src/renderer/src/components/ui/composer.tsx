@@ -41,13 +41,15 @@ export function Composer({
         maxWidth: 'var(--composer-width)',
         minHeight: 'var(--composer-height)',
         padding: 'var(--space-9)',
-        background: 'var(--surface-raised)',
-        border: '1px solid transparent',
+        /* Same shell as ui/card: subtle surface, hairline border, xl radius. */
+        background: 'var(--surface-subtle)',
+        border: '1px solid var(--border-default)',
         borderRadius: 'var(--radius-xl)',
         ...style
       }}
     >
       <textarea
+        className="composer-input"
         value={value}
         onChange={(e) => onChange && onChange(e.target.value)}
         onKeyDown={onKeyDown}

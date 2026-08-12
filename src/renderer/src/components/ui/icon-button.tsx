@@ -54,23 +54,29 @@ export function IconButton({
         width: `${s.box}px`,
         height: `${s.box}px`,
         padding: 0,
-        border: '1px solid transparent',
+        border: '10px solid transparent',
         borderRadius: 'var(--radius-md)',
         cursor: 'pointer',
         transition: 'var(--transition-control)',
         background: variant === 'filled' ? 'var(--surface-control)' : 'transparent',
-        color: active ? 'var(--text-primary)' : 'var(--text-muted)',
+        color: 'var(--text-primary)',
         ...(hovered
-          ? {
-              background: variant === 'filled' ? 'var(--surface-control-hover)' : 'var(--surface-hover)',
-              color: 'var(--text-primary)'
-            }
+          ? { background: variant === 'filled' ? 'var(--surface-control-hover)' : 'var(--surface-hover)' }
           : null),
         ...(disabled ? { opacity: 0.4, cursor: 'not-allowed' } : null),
         ...style
       }}
     >
-      <Icon name={icon} size={glyphSize || s.glyph} />
+      {/* Dim the whole glyph, never its stroke: opacity on the <svg> composites the
+          flattened shape once, so overlapping strokes don't show through each other. */}
+      <Icon
+        name={icon}
+        size={glyphSize || s.glyph}
+        style={{
+          opacity: active || hovered ? 1 : 0.62,
+          transition: `opacity var(--duration-fast) var(--ease-standard)`
+        }}
+      />
     </button>
   )
 }

@@ -30,6 +30,12 @@ a:hover {
   background-clip: content-box;
 }
 
+/* The composer shell already reads as the input; suppress the global focus ring. */
+.composer-input:focus-visible {
+  outline: none;
+  box-shadow: none;
+}
+
 #chatsidebar aside {
   box-sizing: border-box;
   height: 100%;

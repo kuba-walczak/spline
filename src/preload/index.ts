@@ -14,6 +14,11 @@ const api = {
     setBrightness: (percentage: number) => ipcRenderer.invoke('streamDeck:setBrightness', percentage) as Promise<void>
   },
   askClaude: (prompt: string) => ipcRenderer.invoke('askClaude', prompt) as Promise<string>,
+  onClaudeEvent: (callback: (event: Record<string, unknown>) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, data: Record<string, unknown>): void => callback(data)
+    ipcRenderer.on('claude:event', listener)
+    return () => ipcRenderer.removeListener('claude:event', listener)
+  },
   openChatWindow: () => ipcRenderer.invoke('chat:open') as Promise<void>,
   getChatLog: () =>
     ipcRenderer.invoke('notion:getChatLog') as Promise<
@@ -25,7 +30,10 @@ const api = {
     >,
   updateLastActive: (pageId: string) => ipcRenderer.invoke('notion:updateLastActive', pageId) as Promise<void>,
   appendMessages: (pageId: string, messages: Array<{ role: 'user' | 'assistant'; text: string }>) =>
-    ipcRenderer.invoke('notion:appendMessages', pageId, messages) as Promise<void>
+    ipcRenderer.invoke('notion:appendMessages', pageId, messages) as Promise<void>,
+  createChatPage: (name: string) => ipcRenderer.invoke('notion:createChatPage', name) as Promise<string>,
+  updatePageTitle: (pageId: string, name: string) =>
+    ipcRenderer.invoke('notion:updatePageTitle', pageId, name) as Promise<void>
 }
 
 if (process.contextIsolated) {

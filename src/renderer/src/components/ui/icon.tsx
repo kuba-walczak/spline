@@ -1,4 +1,4 @@
-import type { CSSProperties, ReactElement } from 'react'
+import type { CSSProperties, ReactElement, SVGProps } from 'react'
 import {
   ArrowLeft,
   ArrowRight,
@@ -24,6 +24,26 @@ import {
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
 
+/* Lucide's own PanelLeft draws the divider with round caps from y=3 to y=21, so
+   each cap bulges half a stroke past the frame's top and bottom edges and reads
+   as a seam. Same geometry, butt caps: the divider stops dead on the frame's
+   centreline and disappears into it. */
+function PanelLeftGlyph(props: SVGProps<SVGSVGElement>): ReactElement {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      {...props}
+    >
+      <rect x="3" y="3" width="18" height="18" rx="2" />
+      <path d="M9 3v18" strokeLinecap="butt" />
+    </svg>
+  )
+}
+
 /* Lucide is the design system's icon set: 1.5px stroke, round caps/joins,
    24px grid. The DS resolves icons by kebab-case name, so keep that API. */
 const ICONS: Record<string, LucideIcon> = {
@@ -43,6 +63,7 @@ const ICONS: Record<string, LucideIcon> = {
   'message-circle': MessageCircle,
   mic: Mic,
   palette: Palette,
+  'panel-left': PanelLeftGlyph as unknown as LucideIcon,
   plus: Plus,
   'refresh-cw': RefreshCw,
   search: Search,
