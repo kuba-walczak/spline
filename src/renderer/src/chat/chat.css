@@ -17,6 +17,13 @@ a:hover {
   color: var(--text-link-hover);
 }
 
+.chatscroll {
+  scrollbar-gutter: stable both-edges;
+}
+.chatscroll-fade {
+  mask-image: linear-gradient(to bottom, transparent, black 128px, black calc(100% - 128px), transparent);
+  -webkit-mask-image: linear-gradient(to bottom, transparent, black 128px, black calc(100% - 128px), transparent);
+}
 .chatscroll::-webkit-scrollbar {
   width: 10px;
 }
@@ -34,6 +41,35 @@ a:hover {
 .composer-input:focus-visible {
   outline: none;
   box-shadow: none;
+}
+
+/* Project detail — main column tops out at 720px, the rail at 350px; below 700px
+   they stack into one column. */
+.pdgrid {
+  display: grid;
+  grid-template-columns: minmax(320px, 720px) minmax(260px, 350px);
+  gap: 44px;
+  align-items: start;
+}
+@media (max-width: 1180px) {
+  .pdgrid {
+    gap: 28px;
+  }
+}
+@media (max-width: 700px) {
+  .pdgrid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 24px;
+  }
+}
+.pdrow:hover {
+  background: var(--surface-hover);
+}
+.pdclamp {
+  display: -webkit-box;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  overflow: hidden;
 }
 
 #chatsidebar aside {

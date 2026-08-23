@@ -34,9 +34,15 @@ export function DropdownButton({
         display: 'inline-flex',
         alignItems: 'center',
         gap: '6px',
-        height: filled ? '32px' : 'auto',
-        padding: filled ? '0 12px' : '0',
-        background: filled ? (hover ? 'var(--surface-control-hover)' : 'var(--surface-control)') : 'transparent',
+        height: '32px',
+        padding: filled ? '0 12px' : '0 8px',
+        background: filled
+          ? hover
+            ? 'var(--surface-control-hover)'
+            : 'var(--surface-control)'
+          : hover
+            ? 'var(--surface-hover)'
+            : 'transparent',
         border: '1px solid transparent',
         borderRadius: 'var(--radius-md)',
         fontFamily: 'var(--font-sans)',
@@ -56,7 +62,7 @@ export function DropdownButton({
           {detail}
         </span>
       ) : null}
-      <Icon name="chevron-down" size={14} style={{ color: 'var(--text-muted)' }} />
+      <Icon name="chevron-down" size={16} style={{ color: 'var(--text-muted)' }} />
     </button>
   )
 }

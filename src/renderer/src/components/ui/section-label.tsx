@@ -17,7 +17,7 @@ export function SectionLabel({ children, action, flush, className, style }: Sect
         alignItems: 'center',
         justifyContent: 'space-between',
         gap: '8px',
-        padding: '0 14px',
+        padding: '0 0px',
         height: '20px',
         marginTop: flush ? 0 : 'var(--space-7)',
         marginBottom: 'var(--space-3)',

@@ -14,6 +14,7 @@ export interface IconButtonProps {
   size?: keyof typeof SIZES
   variant?: 'ghost' | 'filled'
   glyphSize?: number
+  strokeWidth?: number
   active?: boolean
   disabled?: boolean
   onClick?: () => void
@@ -27,6 +28,7 @@ export function IconButton({
   size = 'md',
   variant = 'ghost',
   glyphSize,
+  strokeWidth,
   active,
   disabled,
   onClick,
@@ -60,7 +62,7 @@ export function IconButton({
         transition: 'var(--transition-control)',
         background: variant === 'filled' ? 'var(--surface-control)' : 'transparent',
         color: 'var(--text-primary)',
-        ...(hovered
+        ...(hovered || active
           ? { background: variant === 'filled' ? 'var(--surface-control-hover)' : 'var(--surface-hover)' }
           : null),
         ...(disabled ? { opacity: 0.4, cursor: 'not-allowed' } : null),
@@ -72,6 +74,7 @@ export function IconButton({
       <Icon
         name={icon}
         size={glyphSize || s.glyph}
+        strokeWidth={strokeWidth}
         style={{
           opacity: active || hovered ? 1 : 0.62,
           transition: `opacity var(--duration-fast) var(--ease-standard)`

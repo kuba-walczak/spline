@@ -1,3 +1,4 @@
+import { useState } from 'react'
 import type { ReactElement } from 'react'
 import { DeviceDebug } from './DeviceDebug'
 import { IconButton } from '@/components/ui/icon-button'
@@ -13,17 +14,134 @@ export interface SidebarConversation {
   title: string
 }
 
+export interface SidebarProject {
+  id: string
+  title: string
+}
+
 export interface SidebarProps {
   conversations: SidebarConversation[]
   activeId: number | null
   onSelect: (id: number) => void
   onNew: () => void
+  onDelete: (id: number) => void
+  projects: SidebarProject[]
+  activeProjectId: string | null
+  onSelectProject: (id: string) => void
+  onNewProject: () => void
   /** Which top-level view the app is on. */
   route: string
   onNavigate: (route: string) => void
 }
 
-export function Sidebar({ conversations, activeId, onSelect, onNew, route, onNavigate }: SidebarProps): ReactElement {
+interface ChatRowProps {
+  conversation: SidebarConversation
+  active: boolean
+  onSelect: () => void
+  onDelete: () => void
+}
+
+function ChatRow({ conversation, active, onSelect, onDelete }: ChatRowProps): ReactElement {
+  const [hover, setHover] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+
+  return (
+    <div
+      style={{ position: 'relative' }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+    >
+      <NavItem icon="message-circle" label={conversation.title} active={active} onClick={onSelect} />
+      {hover || menuOpen ? (
+        <div
+          style={{
+            position: 'absolute',
+            top: '50%',
+            right: 4,
+            transform: 'translateY(-50%)'
+          }}
+        >
+          <IconButton
+            icon="ellipsis-vertical"
+            label="Chat options"
+            size="sm"
+            active={menuOpen}
+            onClick={() => setMenuOpen((v) => !v)}
+          />
+        </div>
+      ) : null}
+      {menuOpen ? (
+        <>
+          <div
+            style={{ position: 'fixed', inset: 0, zIndex: 10 }}
+            onClick={() => setMenuOpen(false)}
+          />
+          <div
+            style={{
+              position: 'absolute',
+              top: 'calc(var(--row-height) + 2px)',
+              right: 4,
+              zIndex: 11,
+              minWidth: 140,
+              padding: 'var(--space-2)',
+              background: '#20201F',
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-md)',
+              boxShadow: '0 8px 24px rgba(0,0,0,0.35)'
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false)
+                onDelete()
+              }}
+              style={{
+                display: 'block',
+                width: '100%',
+                boxSizing: 'border-box',
+                textAlign: 'left',
+                padding: '4px 8px',
+                background: 'transparent',
+                border: 'none',
+                borderRadius: 'var(--radius-sm)',
+                color: '#E6E5E2',
+                fontFamily: 'var(--font-sans)',
+                fontSize: 'var(--text-base)',
+                fontWeight: 'var(--weight-regular)',
+                lineHeight: 'var(--leading-normal)',
+                letterSpacing: 'var(--tracking-tight)',
+                cursor: 'pointer',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis'
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--surface-hover)')}
+              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+            >
+              Delete
+            </button>
+          </div>
+        </>
+      ) : null}
+    </div>
+  )
+}
+
+export function Sidebar({
+  conversations,
+  activeId,
+  onSelect,
+  onNew,
+  onDelete,
+  projects,
+  activeProjectId,
+  onSelectProject,
+  onNewProject,
+  route,
+  onNavigate
+}: SidebarProps): ReactElement {
+  const onProjects = route === 'projects' || route === 'project'
 
   return (
     <aside
@@ -40,10 +158,10 @@ export function Sidebar({ conversations, activeId, onSelect, onNew, route, onNav
         minHeight: 0
       }}
     >
-      <div style={{ padding: '0 var(--sidebar-inset) 12px' }}>
+      <div style={{ padding: '0 10px 12px' }}>
         <SegmentedControl
           fill
-          value={route}
+          value={onProjects ? 'projects' : route}
           onChange={onNavigate}
           items={[
             { value: 'home', label: 'Home', icon: 'house' },
@@ -58,40 +176,77 @@ export function Sidebar({ conversations, activeId, onSelect, onNew, route, onNav
           flex: '1 1 auto',
           overflowY: 'auto',
           overflowX: 'hidden',
-          padding: '0 var(--sidebar-inset) 12px',
           scrollbarWidth: 'thin'
         }}
       >
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--row-gap)' }}>
-          <NavItem icon="plus" label="New" emphasis onClick={onNew} />
+          {onProjects ? (
+            <NavItem icon="plus" label="New project" emphasis onClick={onNewProject} />
+          ) : (
+            <NavItem icon="plus" label="New" emphasis onClick={onNew} />
+          )}
         </div>
 
-        <SectionLabel action={<IconButton icon="plus" label="New chat" size="sm" onClick={onNew} />}>
-          Chats
-        </SectionLabel>
-        {conversations.length > 0 ? (
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--row-gap)' }}>
-            {conversations.map((c) => (
-              <NavItem
-                key={c.id}
-                icon="message-circle"
-                label={c.title}
-                active={c.id === activeId}
-                onClick={() => onSelect(c.id)}
-              />
-            ))}
-          </div>
+        {onProjects ? (
+          <>
+            <SectionLabel action={<IconButton icon="plus" label="New project" size="sm" onClick={onNewProject} />}>
+              Projects
+            </SectionLabel>
+            {projects.length > 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--row-gap)' }}>
+                {projects.map((p) => (
+                  <NavItem
+                    key={p.id}
+                    icon="folder"
+                    label={p.title}
+                    active={p.id === activeProjectId}
+                    onClick={() => onSelectProject(p.id)}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div
+                style={{
+                  padding: '2px 14px',
+                  font: 'var(--type-meta)',
+                  letterSpacing: 'var(--tracking-tight)',
+                  color: 'var(--text-faint)'
+                }}
+              >
+                No projects yet
+              </div>
+            )}
+          </>
         ) : (
-          <div
-            style={{
-              padding: '2px 14px',
-              font: 'var(--type-meta)',
-              letterSpacing: 'var(--tracking-tight)',
-              color: 'var(--text-faint)'
-            }}
-          >
-            No conversations yet
-          </div>
+          <>
+            <SectionLabel action={<IconButton icon="plus" label="New chat" size="sm" onClick={onNew} />}>
+              Chats
+            </SectionLabel>
+            {conversations.length > 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--row-gap)'}}>
+                {conversations.map((c) => (
+                  <ChatRow
+                    key={c.id}
+                    conversation={c}
+                    active={c.id === activeId}
+                    onSelect={() => onSelect(c.id)}
+                    onDelete={() => onDelete(c.id)}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div
+                style={{
+                  padding: '2px 14px',
+                  font: 'var(--type-meta)',
+                  letterSpacing: 'var(--tracking-tight)',
+                  color: 'var(--text-faint)'
+                }}
+              >
+                No conversations yet
+              </div>
+            )}
+          </>
         )}
       </div>
 

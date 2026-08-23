@@ -5,12 +5,23 @@ import { disconnectAllDevices, getStreamDeck, setAllDevicesSolidColor, setLedStr
 import { askClaude, claudeEvents, stopClaude } from './services/ClaudeService'
 import {
   appendMessages,
+  appendProjectNote,
+  archiveChatPage,
   createChatPage,
+  createContextPage,
+  createProjectPage,
   fetchChatLog,
   fetchChatTranscript,
+  fetchProjectContext,
+  fetchProjectDetail,
+  fetchProjects,
+  setChatProject,
+  updateContextPageContent,
   updateLastActive,
   updatePageTitle,
-  type ChatTranscriptMessage
+  updateProjectInstructions,
+  updateProjectTitle,
+  type ChatMessage
 } from './services/NotionService'
 import { startWakeWordListener, stopWakeWordListener } from './services/WakeWordService'
 
@@ -42,9 +53,9 @@ function createChatWindow(): BrowserWindow {
     // Frameless, but keep the native window controls overlaid on the 52px header.
     titleBarStyle: 'hidden',
     titleBarOverlay: {
-      color: '#1a1a19',
+      color: '#111111',
       symbolColor: '#c3c2b7',
-      height: 52
+      height: 32
     },
     webPreferences: {
       preload: join(__dirname, '../preload/index.js'),
@@ -187,7 +198,7 @@ ipcMain.handle('notion:updateLastActive', async (_event, pageId: string) => {
   await updateLastActive(pageId)
 })
 
-ipcMain.handle('notion:appendMessages', async (_event, pageId: string, messages: ChatTranscriptMessage[]) => {
+ipcMain.handle('notion:appendMessages', async (_event, pageId: string, messages: ChatMessage[]) => {
   await appendMessages(pageId, messages)
 })
 
@@ -197,4 +208,53 @@ ipcMain.handle('notion:createChatPage', async (_event, name: string) => {
 
 ipcMain.handle('notion:updatePageTitle', async (_event, pageId: string, name: string) => {
   await updatePageTitle(pageId, name)
+})
+
+ipcMain.handle('notion:setChatProject', async (_event, pageId: string, projectTitle: string) => {
+  await setChatProject(pageId, projectTitle)
+})
+
+ipcMain.handle('notion:archiveChatPage', async (_event, pageId: string) => {
+  await archiveChatPage(pageId)
+})
+
+ipcMain.handle('notion:getProjects', async () => {
+  try {
+    return await fetchProjects()
+  } catch (error) {
+    console.error('[main] notion:getProjects failed:', error)
+    return []
+  }
+})
+
+ipcMain.handle('notion:createProject', async (_event, title: string) => {
+  return createProjectPage(title)
+})
+
+ipcMain.handle('notion:updateProjectTitle', async (_event, pageId: string, title: string) => {
+  await updateProjectTitle(pageId, title)
+})
+
+ipcMain.handle('notion:getProjectDetail', async (_event, pageId: string) => {
+  return fetchProjectDetail(pageId)
+})
+
+ipcMain.handle('notion:getProjectContext', async (_event, projectId: string) => {
+  return fetchProjectContext(projectId)
+})
+
+ipcMain.handle('notion:appendProjectNote', async (_event, pageId: string, text: string) => {
+  await appendProjectNote(pageId, text)
+})
+
+ipcMain.handle('notion:updateProjectInstructions', async (_event, projectId: string, text: string) => {
+  await updateProjectInstructions(projectId, text)
+})
+
+ipcMain.handle('notion:updateContextPageContent', async (_event, pageId: string, text: string) => {
+  await updateContextPageContent(pageId, text)
+})
+
+ipcMain.handle('notion:createContextPage', async (_event, projectId: string, title: string, text: string) => {
+  return createContextPage(projectId, title, text)
 })

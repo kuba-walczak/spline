@@ -38,7 +38,7 @@ export function SegmentedControl({
         gridAutoColumns: fill ? '1fr' : 'auto',
         width: fill ? '100%' : 'auto',
         boxSizing: 'border-box',
-        background: inset ? 'var(--surface-inset)' : 'var(--surface-subtle)',
+        background: inset ? 'var(--surface-inset)' : '#1F1F1F',
         borderRadius: 'var(--radius-md)',
         height: inset ? '24px' : 'var(--control-height-sm)',
         ...style
@@ -61,8 +61,10 @@ export function SegmentedControl({
               height: '100%',
               padding: inset ? '0 12px' : '0 14px',
               boxSizing: 'border-box',
-              background: on ? (inset ? 'var(--surface-thumb-inset)' : 'var(--surface-thumb)') : 'transparent',
-              border: on && inset ? '1px solid var(--border-inset)' : '1px solid transparent',
+              background: on ? (inset ? 'var(--surface-thumb-inset)' : '#363636') : '#1F1F1F',
+              border: on
+                ? `1px solid ${inset ? 'var(--border-inset)' : 'var(--border-default)'}`
+                : '1px solid transparent',
               borderRadius: inset ? 'var(--radius-sm)' : 'var(--radius-md)',
               color: on ? 'var(--text-primary)' : 'var(--text-muted)',
               fontFamily: 'var(--font-sans)',
@@ -72,6 +74,12 @@ export function SegmentedControl({
               lineHeight: 1,
               cursor: 'pointer',
               transition: 'var(--transition-control)'
+            }}
+            onMouseEnter={(e) => {
+              if (!on) e.currentTarget.style.color = 'var(--text-primary)'
+            }}
+            onMouseLeave={(e) => {
+              if (!on) e.currentTarget.style.color = 'var(--text-muted)'
             }}
           >
             {it.icon ? <Icon name={it.icon} size={14} /> : null}

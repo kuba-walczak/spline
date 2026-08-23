@@ -26,14 +26,45 @@ const api = {
     >,
   getChatTranscript: (pageId: string) =>
     ipcRenderer.invoke('notion:getChatTranscript', pageId) as Promise<
-      Array<{ role: 'user' | 'assistant'; text: string }>
+      Array<{ role: 'user' | 'assistant'; content: string; tools: Array<{ name: string; query: string }> }>
     >,
   updateLastActive: (pageId: string) => ipcRenderer.invoke('notion:updateLastActive', pageId) as Promise<void>,
-  appendMessages: (pageId: string, messages: Array<{ role: 'user' | 'assistant'; text: string }>) =>
+  appendMessages: (
+    pageId: string,
+    messages: Array<{ content: string; tools: Array<{ name: string; query: string }> }>
+  ) =>
     ipcRenderer.invoke('notion:appendMessages', pageId, messages) as Promise<void>,
   createChatPage: (name: string) => ipcRenderer.invoke('notion:createChatPage', name) as Promise<string>,
   updatePageTitle: (pageId: string, name: string) =>
-    ipcRenderer.invoke('notion:updatePageTitle', pageId, name) as Promise<void>
+    ipcRenderer.invoke('notion:updatePageTitle', pageId, name) as Promise<void>,
+  setChatProject: (pageId: string, projectTitle: string) =>
+    ipcRenderer.invoke('notion:setChatProject', pageId, projectTitle) as Promise<void>,
+  archiveChatPage: (pageId: string) => ipcRenderer.invoke('notion:archiveChatPage', pageId) as Promise<void>,
+  getProjects: () =>
+    ipcRenderer.invoke('notion:getProjects') as Promise<
+      Array<{ id: string; title: string; lastEdited: string | null; preview: string }>
+    >,
+  createProject: (title: string) => ipcRenderer.invoke('notion:createProject', title) as Promise<string>,
+  updateProjectTitle: (pageId: string, title: string) =>
+    ipcRenderer.invoke('notion:updateProjectTitle', pageId, title) as Promise<void>,
+  getProjectDetail: (pageId: string) =>
+    ipcRenderer.invoke('notion:getProjectDetail', pageId) as Promise<{
+      id: string
+      title: string
+      lastEdited: string | null
+      instructions: string
+      blocks: Array<{ id: string; type: string; text: string; checked?: boolean; url?: string }>
+    }>,
+  getProjectContext: (projectId: string) =>
+    ipcRenderer.invoke('notion:getProjectContext', projectId) as Promise<string>,
+  appendProjectNote: (pageId: string, text: string) =>
+    ipcRenderer.invoke('notion:appendProjectNote', pageId, text) as Promise<void>,
+  updateProjectInstructions: (projectId: string, text: string) =>
+    ipcRenderer.invoke('notion:updateProjectInstructions', projectId, text) as Promise<void>,
+  updateContextPageContent: (pageId: string, text: string) =>
+    ipcRenderer.invoke('notion:updateContextPageContent', pageId, text) as Promise<void>,
+  createContextPage: (projectId: string, title: string, text: string) =>
+    ipcRenderer.invoke('notion:createContextPage', projectId, title, text) as Promise<string>
 }
 
 if (process.contextIsolated) {

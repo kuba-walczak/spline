@@ -1,15 +1,17 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import type { CSSProperties, KeyboardEvent, ReactElement } from 'react'
 import { Composer } from '@/components/ui/composer'
-import { IconButton } from '@/components/ui/icon-button'
 import { Sidebar } from './Sidebar'
 import { TitleBar } from './TitleBar'
-import ProjectsView from './ProjectsView'
+import ProjectDetailView from './ProjectDetailView'
 
 /* Implementation of `Chat Window.dc.html` from the Claude app design system.
    Conversations live in memory only — the app starts empty and nothing survives quit. */
 
-type MessagePart = { kind: 'text'; text: string } | { kind: 'tool'; name: string; query: string }
+type MessagePart =
+  | { kind: 'text'; text: string }
+  | { kind: 'tool'; name: string; query: string }
+  | { kind: 'context'; label: string; text: string }
 
 interface Message {
   id: number
@@ -21,8 +23,29 @@ function textPart(text: string): MessagePart[] {
   return text ? [{ kind: 'text', text }] : []
 }
 
-function partsToPlainText(parts: MessagePart[]): string {
-  return parts.map((p) => (p.kind === 'text' ? p.text : `\`${p.name}(${p.query})\``)).join('')
+/** Notion contract: { messages: [{ content, tools: [{ name, query }] }] }, alternating from the user. */
+interface StoredMessage {
+  content: string
+  tools: Array<{ name: string; query: string }>
+}
+
+function partsToStored(parts: MessagePart[]): StoredMessage {
+  return {
+    content: parts
+      .filter((p): p is { kind: 'text'; text: string } | { kind: 'context'; label: string; text: string } =>
+        p.kind === 'text' || p.kind === 'context'
+      )
+      .map((p) => p.text)
+      .join(''),
+    tools: parts
+      .filter((p): p is { kind: 'tool'; name: string; query: string } => p.kind === 'tool')
+      .map((p) => ({ name: p.name, query: p.query }))
+  }
+}
+
+function storedToParts(message: StoredMessage): MessagePart[] {
+  const tools: MessagePart[] = (message.tools ?? []).map((t) => ({ kind: 'tool', name: t.name, query: t.query }))
+  return tools.concat(textPart(message.content))
 }
 
 interface Conversation {
@@ -31,6 +54,14 @@ interface Conversation {
   messages: Message[]
   sourceId?: string
   loaded?: boolean
+  /** Set the moment a project's context is first injected — the chat is locked to that project from then on. */
+  lockedProjectId?: string
+  lockedProjectTitle?: string
+}
+
+interface Project {
+  id: string
+  title: string
 }
 
 const REPLIES = [
@@ -101,11 +132,13 @@ export default function ChatWindow({
   const [notionChats, setNotionChats] = useState<Conversation[]>([])
   const [activeId, setActiveId] = useState<number | null>(null)
   const [route, setRoute] = useState('home')
+  const [projects, setProjects] = useState<Project[]>([])
+  const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
+  const [creatingProject, setCreatingProject] = useState(false)
+  const [attachedProjects, setAttachedProjects] = useState<Project[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [draft, setDraft] = useState('')
   const [streamingId, setStreamingId] = useState<number | null>(null)
-  const [refreshingChatLog, setRefreshingChatLog] = useState(false)
-  const [bumpingLastActive, setBumpingLastActive] = useState(false)
 
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const nextConversationId = useRef(1)
@@ -115,12 +148,12 @@ export default function ChatWindow({
   const replyIndex = useRef(0)
   const timer = useRef<ReturnType<typeof setInterval> | null>(null)
   const streamTarget = useRef<{ conversationId: number; botId: number } | null>(null)
+  const streamParts = useRef<MessagePart[]>([])
   const conversationsRef = useRef<Conversation[]>([])
   const notionChatsRef = useRef<Conversation[]>([])
   const pendingPageId = useRef(new Map<number, Promise<string>>())
 
   function refreshChatLog(): void {
-    setRefreshingChatLog(true)
     window.api
       .getChatLog()
       .then((entries) => {
@@ -144,11 +177,20 @@ export default function ChatWindow({
         })
       })
       .catch((error) => console.error('[chat] getChatLog failed:', error))
-      .finally(() => setRefreshingChatLog(false))
+  }
+
+  function refreshProjects(): void {
+    window.api
+      .getProjects()
+      .then((entries) => {
+        setProjects(entries.map((entry) => ({ id: entry.id, title: entry.title || 'Untitled' })))
+      })
+      .catch((error) => console.error('[projects] getProjects failed:', error))
   }
 
   useEffect(() => {
     refreshChatLog()
+    refreshProjects()
   }, [])
 
   useEffect(() => {
@@ -180,22 +222,24 @@ export default function ChatWindow({
     })
   }, [])
 
+  function mergeParts(parts: MessagePart[], newParts: MessagePart[]): MessagePart[] {
+    const merged = parts.slice()
+    for (const part of newParts) {
+      const lastPart = merged[merged.length - 1]
+      if (part.kind === 'text' && lastPart?.kind === 'text') {
+        merged[merged.length - 1] = { kind: 'text', text: lastPart.text + part.text }
+      } else {
+        merged.push(part)
+      }
+    }
+    return merged
+  }
+
   function appendParts(target: { conversationId: number; botId: number }, newParts: MessagePart[]): void {
+    streamParts.current = mergeParts(streamParts.current, newParts)
     patch(target.conversationId, (c) => ({
       ...c,
-      messages: c.messages.map((m) => {
-        if (m.id !== target.botId) return m
-        const parts = m.parts.slice()
-        for (const part of newParts) {
-          const lastPart = parts[parts.length - 1]
-          if (part.kind === 'text' && lastPart?.kind === 'text') {
-            parts[parts.length - 1] = { kind: 'text', text: lastPart.text + part.text }
-          } else {
-            parts.push(part)
-          }
-        }
-        return { ...m, parts }
-      })
+      messages: c.messages.map((m) => (m.id === target.botId ? { ...m, parts: mergeParts(m.parts, newParts) } : m))
     }))
   }
 
@@ -219,7 +263,7 @@ export default function ChatWindow({
         const loadedMessages = rows.map((row) => ({
           id: nextMessageId.current++,
           role: row.role,
-          parts: textPart(row.text)
+          parts: storedToParts(row)
         }))
         patch(chat.id, (c) => ({ ...c, messages: loadedMessages }))
       })
@@ -227,30 +271,6 @@ export default function ChatWindow({
         console.error('[chat] getChatTranscript failed:', error)
         patch(chat.id, (c) => ({ ...c, loaded: false }))
       })
-  }
-
-  async function bumpLastActiveIfChanged(): Promise<void> {
-    if (!active?.sourceId || bumpingLastActive || streamingId === active.id) return
-    const sourceId = active.sourceId
-    if (active.messages.length === 0) return
-
-    setBumpingLastActive(true)
-    try {
-      const remote = await window.api.getChatTranscript(sourceId)
-      const newMessages = active.messages
-        .slice(remote.length)
-        .map((m) => ({ role: m.role, text: partsToPlainText(m.parts) }))
-
-      if (newMessages.length > 0) {
-        await window.api.appendMessages(sourceId, newMessages)
-        await window.api.updateLastActive(sourceId)
-        refreshChatLog()
-      }
-    } catch (error) {
-      console.error('[chat] bumpLastActiveIfChanged failed:', error)
-    } finally {
-      setBumpingLastActive(false)
-    }
   }
 
   function createConversation(): number {
@@ -291,6 +311,53 @@ export default function ChatWindow({
     }
   }
 
+  function openProject(id: string): void {
+    setActiveProjectId(id)
+    setRoute('project')
+  }
+
+  function newProject(): void {
+    if (creatingProject) return
+    setCreatingProject(true)
+    window.api
+      .createProject('Untitled project')
+      .then((id) => {
+        refreshProjects()
+        openProject(id)
+      })
+      .catch((error) => console.error('[projects] createProject failed:', error))
+      .finally(() => setCreatingProject(false))
+  }
+
+  function attachProject(id: string): void {
+    if (active?.lockedProjectId) return
+    setAttachedProjects((prev) => {
+      if (prev.some((p) => p.id === id)) return prev
+      const project = projects.find((p) => p.id === id)
+      return project ? prev.concat(project) : prev
+    })
+  }
+
+  function removeAttachedProject(id: string): void {
+    setAttachedProjects((prev) => prev.filter((p) => p.id !== id))
+  }
+
+  function deleteConversation(id: number): void {
+    const chat = allConversations.find((c) => c.id === id)
+    if (!chat) return
+
+    setConversations((prev) => prev.filter((c) => c.id !== id))
+    setNotionChats((prev) => prev.filter((c) => c.id !== id))
+    if (activeId === id) setActiveId(null)
+
+    const archive = async (): Promise<void> => {
+      const sourceId = chat.sourceId ?? (await ensureSourceId(id))
+      if (!sourceId) return
+      await window.api.archiveChatPage(sourceId)
+    }
+    archive().catch((error) => console.error('[chat] archiveChatPage failed:', error))
+  }
+
   function selectConversation(id: number): void {
     setActiveId(id)
     setRoute('home')
@@ -320,23 +387,57 @@ export default function ChatWindow({
     const text = draft.trim()
     if (!text || streamingId !== null) return
 
+    const wasLocked = Boolean(active?.lockedProjectId)
     const conversationId = activeId ?? createConversation()
-    const userMsg: Message = { id: nextMessageId.current++, role: 'user', parts: textPart(text) }
+    const projectsToInject = attachedProjects
+    const lockProject = !wasLocked && projectsToInject.length > 0 ? projectsToInject[0] : null
+
+    let userParts: MessagePart[] = textPart(text)
+    let sendText = text
+
+    if (projectsToInject.length > 0) {
+      try {
+        const contexts = await Promise.all(
+          projectsToInject.map(async (p) => ({ title: p.title, text: await window.api.getProjectContext(p.id) }))
+        )
+        const nonEmpty = contexts.filter((c) => c.text.trim().length > 0)
+        if (nonEmpty.length > 0) {
+          const contextParts: MessagePart[] = nonEmpty.map((c) => ({
+            kind: 'context',
+            label: c.title,
+            text: `[${c.title}]\n${c.text.trim()}`
+          }))
+          sendText = nonEmpty.map((c) => `[${c.title}]\n${c.text.trim()}`).join('\n\n') + '\n\n' + text
+          userParts = contextParts.concat(textPart(text))
+        }
+      } catch (error) {
+        console.error('[chat] getProjectContext failed:', error)
+      }
+    }
+
+    const userMsg: Message = { id: nextMessageId.current++, role: 'user', parts: userParts }
     const botId = nextMessageId.current++
 
     let title: string | null = null
     patch(conversationId, (c) => {
       title = c.messages.length === 0 ? titleFrom(text) : c.title
-      return { ...c, title, messages: c.messages.concat([userMsg, { id: botId, role: 'assistant', parts: [] }]) }
+      return {
+        ...c,
+        title,
+        messages: c.messages.concat([userMsg, { id: botId, role: 'assistant', parts: [] }]),
+        ...(lockProject ? { lockedProjectId: lockProject.id, lockedProjectTitle: lockProject.title } : {})
+      }
     })
     setDraft('')
+    setAttachedProjects([])
     setStreamingId(conversationId)
 
     if (onSend) {
       streamTarget.current = { conversationId, botId }
+      streamParts.current = []
       let finalText: string | null = null
       try {
-        finalText = await onSend(text)
+        finalText = await onSend(sendText)
       } catch (error) {
         appendParts({ conversationId, botId }, textPart(`\nSomething went wrong: ${String(error)}`))
       } finally {
@@ -347,11 +448,10 @@ export default function ChatWindow({
       const sourceId = await ensureSourceId(conversationId)
       if (sourceId && finalText !== null) {
         try {
-          await window.api.appendMessages(sourceId, [
-            { role: 'user', text },
-            { role: 'assistant', text: finalText }
-          ])
+          const assistantParts = streamParts.current.length > 0 ? streamParts.current : textPart(finalText)
+          await window.api.appendMessages(sourceId, [partsToStored(userParts), partsToStored(assistantParts)])
           if (title) await window.api.updatePageTitle(sourceId, title)
+          if (lockProject) await window.api.setChatProject(sourceId, lockProject.title)
           await window.api.updateLastActive(sourceId)
           refreshChatLog()
         } catch (error) {
@@ -376,21 +476,37 @@ export default function ChatWindow({
   const userBubbleStyle: CSSProperties = {
     maxWidth: '76%',
     boxSizing: 'border-box',
-    background: outlined ? 'transparent' : 'var(--surface-control)',
+    background: outlined ? 'transparent' : '#212121',
     border: outlined ? '1px solid var(--border-default)' : '1px solid transparent',
-    color: 'var(--text-body)',
+    color: '#E6E5E2',
     padding: '11px 16px',
     borderRadius: 'var(--radius-lg, 10px)',
     font: 'var(--type-body)',
+    fontSize: 'var(--text-md)',
     letterSpacing: 'var(--tracking-tight)',
     whiteSpace: 'pre-wrap'
   }
   const botBubbleStyle: CSSProperties = {
     maxWidth: '100%',
-    color: 'var(--text-body)',
+    color: '#E6E5E2',
     font: 'var(--type-body)',
+    fontSize: 'var(--text-md)',
     letterSpacing: 'var(--tracking-tight)',
     whiteSpace: 'pre-wrap'
+  }
+  const contextBlockStyle: CSSProperties = {
+    display: 'block',
+    margin: '0 0 10px',
+    padding: '8px 10px',
+    background: 'var(--surface-subtle)',
+    border: '1px solid var(--border-default)',
+    borderRadius: 'var(--radius-sm)',
+    color: 'var(--text-muted)',
+    font: 'var(--type-meta)',
+    letterSpacing: 'var(--tracking-tight)',
+    whiteSpace: 'pre-wrap',
+    maxHeight: 160,
+    overflowY: 'auto'
   }
   const toolBadgeStyle: CSSProperties = {
     display: 'inline-flex',
@@ -416,6 +532,7 @@ export default function ChatWindow({
     <div
       style={{
         display: 'flex',
+        flexDirection: 'column',
         height: '100vh',
         width: '100%',
         overflow: 'hidden',
@@ -423,60 +540,90 @@ export default function ChatWindow({
         fontFamily: 'var(--font-sans)'
       }}
     >
-      {showSidebar && !sidebarCollapsed ? (
-        <div
-          id="chatsidebar"
+      <TitleBar
+        sidebarCollapsed={sidebarCollapsed}
+        onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
+      />
+
+      <div style={{ display: 'flex', flex: '1 1 auto', minHeight: 0, overflow: 'hidden' }}>
+        {showSidebar && !sidebarCollapsed ? (
+          <div
+            id="chatsidebar"
+            style={{
+              flex: '0 0 auto',
+              height: '100%',
+              minHeight: 0,
+              overflow: 'hidden',
+              background: 'var(--surface-sidebar)'
+            }}
+          >
+            <Sidebar
+              conversations={allConversations}
+              activeId={activeId}
+              onSelect={selectConversation}
+              onNew={createConversation}
+              onDelete={deleteConversation}
+              projects={projects}
+              activeProjectId={activeProjectId}
+              onSelectProject={openProject}
+              onNewProject={newProject}
+              route={route}
+              onNavigate={setRoute}
+            />
+          </div>
+        ) : null}
+
+        <main
           style={{
-            flex: '0 0 auto',
+            flex: '1 1 auto',
+            position: 'relative',
+            display: 'flex',
+            flexDirection: 'column',
+            minWidth: 0,
             height: '100%',
-            minHeight: 0,
-            overflow: 'hidden',
-            background: 'var(--surface-sidebar)'
+            background: 'var(--surface-app)',
+            borderTop: 'var(--hairline)',
+            borderLeft: 'var(--hairline)',
+            borderTopLeftRadius: 'var(--radius-xl)'
           }}
         >
-          <Sidebar
-            conversations={allConversations}
-            activeId={activeId}
-            onSelect={selectConversation}
-            onNew={createConversation}
-            route={route}
-            onNavigate={setRoute}
-          />
-        </div>
-      ) : null}
-
-      <main
-        style={{
-          flex: '1 1 auto',
-          display: 'flex',
-          flexDirection: 'column',
-          minWidth: 0,
-          height: '100%',
-          background: 'var(--surface-app)'
-        }}
-      >
-        <TitleBar
-          icon={route === 'projects' ? undefined : active ? 'message-circle' : undefined}
-          title={route === 'projects' ? undefined : active ? active.title : 'No conversation'}
-          muted={!active}
-          sidebarCollapsed={sidebarCollapsed}
-          onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
-          action={
-            route !== 'projects' && active?.sourceId ? (
-              <IconButton
-                icon="refresh-cw"
-                label="Sync new messages to Notion"
-                size="sm"
-                onClick={() => void bumpLastActiveIfChanged()}
-                disabled={bumpingLastActive || refreshingChatLog}
-              />
-            ) : null
-          }
-        />
-
-        {route === 'projects' ? <ProjectsView /> : (
+          {route === 'projects' ? (
+          <div
+            style={{
+              flex: '1 1 auto',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              padding: '0 24px'
+            }}
+          >
+            <span style={{ font: 'var(--type-body)', color: 'var(--text-faint)' }}>
+              Select a project from the sidebar, or start a new one.
+            </span>
+          </div>
+        ) : route === 'project' && activeProjectId ? (
+          <ProjectDetailView projectId={activeProjectId} onBack={() => setRoute('projects')} />
+        ) : (
         <>
-        <div ref={scrollRef} className="chatscroll" style={{ flex: '1 1 auto', overflowY: 'auto', overflowX: 'hidden' }}>
+        <nav
+          style={{
+            position: 'absolute',
+            top: 0,
+            left: 0,
+            right: 0,
+            display: 'flex',
+            alignItems: 'center',
+            gap: 'var(--space-4)',
+            padding: '24px 28px 0',
+            font: 'var(--weight-semibold) var(--text-sm)/1 var(--font-sans)',
+            letterSpacing: 'var(--tracking-tight)'
+          }}
+        >
+          <span style={{ color: active ? 'var(--text-primary)' : 'var(--text-faint)' }}>
+            {active ? active.title : 'No conversation'}
+          </span>
+        </nav>
+        <div ref={scrollRef} className="chatscroll chatscroll-fade" style={{ flex: '1 1 auto', overflowY: 'auto', overflowX: 'hidden' }}>
           {active && messages.length > 0 ? (
             <div
               style={{
@@ -495,7 +642,11 @@ export default function ChatWindow({
                 >
                   <div style={m.role === 'user' ? userBubbleStyle : botBubbleStyle}>
                     {m.parts.map((part, i) =>
-                      part.kind === 'tool' ? (
+                      part.kind === 'context' ? (
+                        <span key={i} style={contextBlockStyle}>
+                          {part.text}
+                        </span>
+                      ) : part.kind === 'tool' ? (
                         <span key={i}>
                           <span title={part.query} style={toolBadgeStyle}>
                             <strong style={{ fontWeight: 'var(--weight-medium)' }}>{part.name}</strong>
@@ -531,20 +682,30 @@ export default function ChatWindow({
           )}
         </div>
 
-        <div style={{ flex: '0 0 auto', display: 'flex', justifyContent: 'center', padding: '0 24px 22px' }}>
+        <div style={{ flex: '0 0 auto', display: 'flex', justifyContent: 'center', padding: '0 34px 22px 24px' }}>
           <Composer
             value={draft}
             onChange={setDraft}
             onKeyDown={onKeyDown}
-            placeholder={active ? 'Reply to Claude…' : 'Message Claude…'}
+            placeholder=""
             model="Opus 5"
             effort="High"
+            projects={projects}
+            attached={attachedProjects}
+            onSelectProject={attachProject}
+            onRemoveProject={removeAttachedProject}
+            lockedProject={
+              active?.lockedProjectId
+                ? { id: active.lockedProjectId, title: active.lockedProjectTitle ?? '' }
+                : undefined
+            }
             style={{ maxWidth: 'var(--container)', minHeight: '104px' }}
           />
         </div>
         </>
         )}
-      </main>
+        </main>
+      </div>
     </div>
   )
 }

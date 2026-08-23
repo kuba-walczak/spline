@@ -17,6 +17,7 @@ export interface TitleBarProps {
   muted?: boolean
   sidebarCollapsed: boolean
   onToggleSidebar: () => void
+  onOpenSettings?: () => void
   /** Trailing controls, right-aligned. */
   action?: ReactNode
 }
@@ -27,6 +28,7 @@ export function TitleBar({
   muted,
   sidebarCollapsed,
   onToggleSidebar,
+  onOpenSettings,
   action
 }: TitleBarProps): ReactElement {
   return (
@@ -37,14 +39,16 @@ export function TitleBar({
         alignItems: 'center',
         justifyContent: 'space-between',
         gap: '12px',
-        height: '52px',
+        height: '32px',
+        background: 'var(--surface-sidebar)',
         /* Right inset clears the native window-control overlay when there is one. */
         padding: '0 calc(100vw - env(titlebar-area-width, 100vw) + 16px) 0 12px',
         ...dragStyle
       }}
     >
       <div style={{ display: 'flex', alignItems: 'center', gap: '9px', minWidth: 0 }}>
-        <div style={noDragStyle}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: '2px', ...noDragStyle }}>
+          <IconButton icon="menu" label="Settings" onClick={onOpenSettings} />
           <IconButton
             icon="panel-left"
             label={sidebarCollapsed ? 'Show sidebar' : 'Hide sidebar'}

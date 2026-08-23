@@ -1,5 +1,18 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
 
+interface ChatToolCall {
+  name: string
+  query: string
+}
+
+/** Stored shape — role is positional: messages alternate, starting with the user. */
+interface ChatMessage {
+  content: string
+  tools: ChatToolCall[]
+}
+
+type ChatTranscriptMessage = ChatMessage & { role: 'user' | 'assistant' }
+
 declare global {
   interface Window {
     electron: ElectronAPI
@@ -11,11 +24,28 @@ declare global {
       onClaudeEvent: (callback: (event: Record<string, unknown>) => void) => () => void
       openChatWindow: () => Promise<void>
       getChatLog: () => Promise<Array<{ id: string; name: string; lastActive: string | null }>>
-      getChatTranscript: (pageId: string) => Promise<Array<{ role: 'user' | 'assistant'; text: string }>>
+      getChatTranscript: (pageId: string) => Promise<ChatTranscriptMessage[]>
       updateLastActive: (pageId: string) => Promise<void>
-      appendMessages: (pageId: string, messages: Array<{ role: 'user' | 'assistant'; text: string }>) => Promise<void>
+      appendMessages: (pageId: string, messages: ChatMessage[]) => Promise<void>
       createChatPage: (name: string) => Promise<string>
       updatePageTitle: (pageId: string, name: string) => Promise<void>
+      setChatProject: (pageId: string, projectTitle: string) => Promise<void>
+      archiveChatPage: (pageId: string) => Promise<void>
+      getProjects: () => Promise<Array<{ id: string; title: string; lastEdited: string | null; preview: string }>>
+      createProject: (title: string) => Promise<string>
+      updateProjectTitle: (pageId: string, title: string) => Promise<void>
+      getProjectDetail: (pageId: string) => Promise<{
+        id: string
+        title: string
+        lastEdited: string | null
+        instructions: string
+        blocks: Array<{ id: string; type: string; text: string; checked?: boolean; url?: string }>
+      }>
+      getProjectContext: (projectId: string) => Promise<string>
+      appendProjectNote: (pageId: string, text: string) => Promise<void>
+      updateProjectInstructions: (projectId: string, text: string) => Promise<void>
+      updateContextPageContent: (pageId: string, text: string) => Promise<void>
+      createContextPage: (projectId: string, title: string, text: string) => Promise<string>
     }
   }
 }
