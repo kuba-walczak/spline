@@ -127,11 +127,10 @@ export function Composer({
             glyphSize={19}
             strokeWidth={2.5}
             active={menuOpen}
-            disabled={Boolean(lockedProject)}
-            onClick={() => (lockedProject ? undefined : projects ? setMenuOpen((v) => !v) : onAdd?.())}
-            style={{ color: lockedProject ? 'var(--text-faint)' : '#E2E1DE' }}
+            onClick={() => (projects ? setMenuOpen((v) => !v) : onAdd?.())}
+            style={{ color: '#E2E1DE' }}
           />
-          {menuOpen && projects && !lockedProject ? (
+          {menuOpen && projects ? (
             <>
               <div
                 onClick={() => setMenuOpen(false)}
@@ -154,7 +153,7 @@ export function Composer({
                   zIndex: 41
                 }}
               >
-                {projects.filter((p) => !attached.some((a) => a.id === p.id)).length === 0 ? (
+                {projects.filter((p) => !attached.some((a) => a.id === p.id) && p.id !== lockedProject?.id).length === 0 ? (
                   <div
                     style={{
                       padding: '6px 10px',
@@ -167,7 +166,7 @@ export function Composer({
                   </div>
                 ) : (
                   projects
-                    .filter((p) => !attached.some((a) => a.id === p.id))
+                    .filter((p) => !attached.some((a) => a.id === p.id) && p.id !== lockedProject?.id)
                     .map((p) => (
                     <button
                       key={p.id}
@@ -232,8 +231,8 @@ export function Composer({
             <Icon name="lock" size={12} />
             {lockedProject.title}
           </span>
-        ) : (
-        attached.map((p) => (
+        ) : null}
+        {attached.map((p) => (
           <button
             key={p.id}
             type="button"
@@ -263,8 +262,7 @@ export function Composer({
           >
             {p.title}
           </button>
-        ))
-        )}
+        ))}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-5)' }}>
           {model ? <DropdownButton variant="bare" value={model} detail={effort} onClick={onModelClick} /> : null}

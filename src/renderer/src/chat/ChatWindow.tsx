@@ -3,7 +3,9 @@ import type { CSSProperties, KeyboardEvent, ReactElement } from 'react'
 import { Composer } from '@/components/ui/composer'
 import { Sidebar } from './Sidebar'
 import { TitleBar } from './TitleBar'
+import { SettingsModal } from './SettingsModal'
 import ProjectDetailView from './ProjectDetailView'
+import { Icon } from '@/components/ui/icon'
 
 /* Implementation of `Chat Window.dc.html` from the Claude app design system.
    Conversations live in memory only — the app starts empty and nothing survives quit. */
@@ -12,6 +14,7 @@ type MessagePart =
   | { kind: 'text'; text: string }
   | { kind: 'tool'; name: string; query: string }
   | { kind: 'context'; label: string; text: string }
+  | { kind: 'injection'; text: string }
 
 interface Message {
   id: number
@@ -23,29 +26,32 @@ function textPart(text: string): MessagePart[] {
   return text ? [{ kind: 'text', text }] : []
 }
 
-/** Notion contract: { messages: [{ content, tools: [{ name, query }] }] }, alternating from the user. */
+/** Notion contract: { messages: [{ content, tools: [{ name, query }], projects }] }, alternating from the user. */
 interface StoredMessage {
   content: string
   tools: Array<{ name: string; query: string }>
+  /** Titles of the projects injected into this message. */
+  projects: string[]
 }
 
 function partsToStored(parts: MessagePart[]): StoredMessage {
+  const contextParts = parts.filter((p): p is { kind: 'context'; label: string; text: string } => p.kind === 'context')
   return {
     content: parts
-      .filter((p): p is { kind: 'text'; text: string } | { kind: 'context'; label: string; text: string } =>
-        p.kind === 'text' || p.kind === 'context'
-      )
+      .filter((p): p is { kind: 'text'; text: string } => p.kind === 'text')
       .map((p) => p.text)
       .join(''),
     tools: parts
       .filter((p): p is { kind: 'tool'; name: string; query: string } => p.kind === 'tool')
-      .map((p) => ({ name: p.name, query: p.query }))
+      .map((p) => ({ name: p.name, query: p.query })),
+    projects: contextParts.map((p) => p.label)
   }
 }
 
 function storedToParts(message: StoredMessage): MessagePart[] {
+  const projects: MessagePart[] = (message.projects ?? []).map((title) => ({ kind: 'context', label: title, text: title }))
   const tools: MessagePart[] = (message.tools ?? []).map((t) => ({ kind: 'tool', name: t.name, query: t.query }))
-  return tools.concat(textPart(message.content))
+  return projects.concat(tools).concat(textPart(message.content))
 }
 
 interface Conversation {
@@ -57,11 +63,18 @@ interface Conversation {
   /** Set the moment a project's context is first injected — the chat is locked to that project from then on. */
   lockedProjectId?: string
   lockedProjectTitle?: string
+  /** Titles of every project ever injected into this conversation — drives the sidebar tint. */
+  referencedProjectTitles?: string[]
+}
+
+function unionTitles(existing: string[] | undefined, added: string[]): string[] {
+  return Array.from(new Set((existing ?? []).concat(added)))
 }
 
 interface Project {
   id: string
   title: string
+  color: string | null
 }
 
 const REPLIES = [
@@ -137,10 +150,31 @@ export default function ChatWindow({
   const [creatingProject, setCreatingProject] = useState(false)
   const [attachedProjects, setAttachedProjects] = useState<Project[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [settingsOpen, setSettingsOpen] = useState(false)
   const [draft, setDraft] = useState('')
   const [streamingId, setStreamingId] = useState<number | null>(null)
 
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  const [fadeEdges, setFadeEdges] = useState({ top: false, bottom: false })
+
+  function updateFadeEdges(): void {
+    const el = scrollRef.current
+    if (!el) return
+    const top = el.scrollTop > 4
+    const bottom = el.scrollTop + el.clientHeight < el.scrollHeight - 4
+    setFadeEdges((prev) => (prev.top === top && prev.bottom === bottom ? prev : { top, bottom }))
+  }
+
+  /** Only fades the edge that actually has more content scrolled past it — a short
+      conversation stays fully opaque instead of washing out under a fixed-height mask. */
+  function fadeMask(edges: { top: boolean; bottom: boolean }): string | undefined {
+    if (!edges.top && !edges.bottom) return undefined
+    const stops = [
+      edges.top ? 'transparent, black 128px' : 'black 0%',
+      edges.bottom ? 'black calc(100% - 128px), transparent' : 'black 100%'
+    ]
+    return `linear-gradient(to bottom, ${stops.join(', ')})`
+  }
   const nextConversationId = useRef(1)
   const nextMessageId = useRef(1)
   const nextNotionId = useRef(-1)
@@ -159,21 +193,24 @@ export default function ChatWindow({
       .then((entries) => {
         setNotionChats((prev) => {
           const bySourceId = new Map(prev.map((c) => [c.sourceId, c]))
-          return entries.map((entry) => {
-            const existing = bySourceId.get(entry.id)
-            let id = notionIdBySourceId.current.get(entry.id)
-            if (id === undefined) {
-              id = nextNotionId.current--
-              notionIdBySourceId.current.set(entry.id, id)
-            }
-            return {
-              id,
-              title: entry.name,
-              messages: existing?.messages ?? [],
-              loaded: existing?.loaded,
-              sourceId: entry.id
-            }
-          })
+          const localSourceIds = new Set(conversationsRef.current.map((c) => c.sourceId).filter(Boolean))
+          return entries
+            .filter((entry) => !localSourceIds.has(entry.id))
+            .map((entry) => {
+              const existing = bySourceId.get(entry.id)
+              let id = notionIdBySourceId.current.get(entry.id)
+              if (id === undefined) {
+                id = nextNotionId.current--
+                notionIdBySourceId.current.set(entry.id, id)
+              }
+              return {
+                id,
+                title: entry.name,
+                messages: existing?.messages ?? [],
+                loaded: existing?.loaded,
+                sourceId: entry.id
+              }
+            })
         })
       })
       .catch((error) => console.error('[chat] getChatLog failed:', error))
@@ -183,7 +220,9 @@ export default function ChatWindow({
     window.api
       .getProjects()
       .then((entries) => {
-        setProjects(entries.map((entry) => ({ id: entry.id, title: entry.title || 'Untitled' })))
+        setProjects(
+          entries.map((entry) => ({ id: entry.id, title: entry.title || 'Untitled', color: entry.color }))
+        )
       })
       .catch((error) => console.error('[projects] getProjects failed:', error))
   }
@@ -202,12 +241,19 @@ export default function ChatWindow({
   }, [notionChats])
 
   const allConversations = notionChats.concat(conversations)
+
+  function colorsFor(titles: string[] | undefined): string[] {
+    if (!titles || titles.length === 0) return []
+    const byTitle = new Map(projects.map((p) => [p.title, p.color]))
+    return Array.from(new Set(titles.map((t) => byTitle.get(t)).filter((c): c is string => Boolean(c))))
+  }
   const active = allConversations.find((c) => c.id === activeId) ?? null
   const messages = active ? active.messages : []
 
   useLayoutEffect(() => {
     const el = scrollRef.current
     if (el) el.scrollTop = el.scrollHeight
+    updateFadeEdges()
   }, [messages, activeId])
 
   useEffect(() => () => clearTimer(), [])
@@ -265,7 +311,12 @@ export default function ChatWindow({
           role: row.role,
           parts: storedToParts(row)
         }))
-        patch(chat.id, (c) => ({ ...c, messages: loadedMessages }))
+        const referenced = rows.flatMap((row) => row.projects ?? [])
+        patch(chat.id, (c) => ({
+          ...c,
+          messages: loadedMessages,
+          referencedProjectTitles: unionTitles(c.referencedProjectTitles, referenced)
+        }))
       })
       .catch((error) => {
         console.error('[chat] getChatTranscript failed:', error)
@@ -330,7 +381,6 @@ export default function ChatWindow({
   }
 
   function attachProject(id: string): void {
-    if (active?.lockedProjectId) return
     setAttachedProjects((prev) => {
       if (prev.some((p) => p.id === id)) return prev
       const project = projects.find((p) => p.id === id)
@@ -397,18 +447,23 @@ export default function ChatWindow({
 
     if (projectsToInject.length > 0) {
       try {
-        const contexts = await Promise.all(
-          projectsToInject.map(async (p) => ({ title: p.title, text: await window.api.getProjectContext(p.id) }))
-        )
+        const [injectionPrompt, contexts] = await Promise.all([
+          window.api.getProjectMarkdown(),
+          Promise.all(projectsToInject.map(async (p) => ({ title: p.title, text: await window.api.getProjectContext(p.id) })))
+        ])
         const nonEmpty = contexts.filter((c) => c.text.trim().length > 0)
-        if (nonEmpty.length > 0) {
+        if (nonEmpty.length > 0 || injectionPrompt.trim()) {
+          const injectionPart: MessagePart[] = injectionPrompt.trim()
+            ? [{ kind: 'injection', text: injectionPrompt.trim() }]
+            : []
           const contextParts: MessagePart[] = nonEmpty.map((c) => ({
             kind: 'context',
             label: c.title,
-            text: `[${c.title}]\n${c.text.trim()}`
+            text: `${c.title}\n\n${c.text.trim()}`
           }))
-          sendText = nonEmpty.map((c) => `[${c.title}]\n${c.text.trim()}`).join('\n\n') + '\n\n' + text
-          userParts = contextParts.concat(textPart(text))
+          const blocks = [injectionPrompt.trim(), ...nonEmpty.map((c) => `${c.title}\n\n${c.text.trim()}`)].filter(Boolean)
+          sendText = blocks.length > 0 ? blocks.join('\n\n') + '\n\n' + text : text
+          userParts = injectionPart.concat(contextParts).concat(textPart(text))
         }
       } catch (error) {
         console.error('[chat] getProjectContext failed:', error)
@@ -425,6 +480,7 @@ export default function ChatWindow({
         ...c,
         title,
         messages: c.messages.concat([userMsg, { id: botId, role: 'assistant', parts: [] }]),
+        referencedProjectTitles: unionTitles(c.referencedProjectTitles, projectsToInject.map((p) => p.title)),
         ...(lockProject ? { lockedProjectId: lockProject.id, lockedProjectTitle: lockProject.title } : {})
       }
     })
@@ -484,7 +540,8 @@ export default function ChatWindow({
     font: 'var(--type-body)',
     fontSize: 'var(--text-md)',
     letterSpacing: 'var(--tracking-tight)',
-    whiteSpace: 'pre-wrap'
+    whiteSpace: 'pre-wrap',
+    overflowWrap: 'break-word'
   }
   const botBubbleStyle: CSSProperties = {
     maxWidth: '100%',
@@ -493,20 +550,6 @@ export default function ChatWindow({
     fontSize: 'var(--text-md)',
     letterSpacing: 'var(--tracking-tight)',
     whiteSpace: 'pre-wrap'
-  }
-  const contextBlockStyle: CSSProperties = {
-    display: 'block',
-    margin: '0 0 10px',
-    padding: '8px 10px',
-    background: 'var(--surface-subtle)',
-    border: '1px solid var(--border-default)',
-    borderRadius: 'var(--radius-sm)',
-    color: 'var(--text-muted)',
-    font: 'var(--type-meta)',
-    letterSpacing: 'var(--tracking-tight)',
-    whiteSpace: 'pre-wrap',
-    maxHeight: 160,
-    overflowY: 'auto'
   }
   const toolBadgeStyle: CSSProperties = {
     display: 'inline-flex',
@@ -525,6 +568,51 @@ export default function ChatWindow({
     overflow: 'hidden'
   }
 
+/** Renders each project-context part as its own badge, for use in a standalone bubble. */
+  function renderContextBadges(parts: MessagePart[]): ReactElement[] {
+    return parts
+      .filter((p): p is { kind: 'context'; label: string; text: string } => p.kind === 'context')
+      .map((part, i) => (
+        <span key={i} title={part.text} style={{ ...toolBadgeStyle, margin: 0 }}>
+          <Icon name="folder" size={12} />
+          <strong style={{ fontWeight: 'var(--weight-medium)' }}>{part.label}</strong>
+        </span>
+      ))
+  }
+
+  /** Renders a message's parts. The global injection prompt carries no per-project identity, so it stays silent.
+      Project context is handled separately by renderContextBadges, in its own bubble. */
+  function renderParts(parts: MessagePart[]): ReactElement[] {
+    const rendered: ReactElement[] = []
+    let i = 0
+    while (i < parts.length) {
+      const part = parts[i]
+
+      if (part.kind === 'injection' || part.kind === 'context') {
+        i++
+        continue
+      }
+
+      if (part.kind === 'tool') {
+        rendered.push(
+          <span key={i}>
+            <span title={part.query} style={toolBadgeStyle}>
+              <strong style={{ fontWeight: 'var(--weight-medium)' }}>{part.name}</strong>
+              <span style={{ color: 'var(--text-muted)' }}>
+                {part.query.length > 40 ? `${part.query.slice(0, 40)}…` : part.query}
+              </span>
+            </span>
+            <br />
+          </span>
+        )
+      } else {
+        rendered.push(<span key={i}>{part.text}</span>)
+      }
+      i++
+    }
+    return rendered
+  }
+
   const last = messages[messages.length - 1]
   const streamingHere = streamingId !== null && streamingId === activeId
 
@@ -536,14 +624,16 @@ export default function ChatWindow({
         height: '100vh',
         width: '100%',
         overflow: 'hidden',
-        background: 'var(--surface-app)',
+        background: 'var(--surface-sidebar)',
         fontFamily: 'var(--font-sans)'
       }}
     >
       <TitleBar
         sidebarCollapsed={sidebarCollapsed}
         onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
+        onOpenSettings={() => setSettingsOpen(true)}
       />
+      {settingsOpen ? <SettingsModal onClose={() => setSettingsOpen(false)} /> : null}
 
       <div style={{ display: 'flex', flex: '1 1 auto', minHeight: 0, overflow: 'hidden' }}>
         {showSidebar && !sidebarCollapsed ? (
@@ -558,7 +648,11 @@ export default function ChatWindow({
             }}
           >
             <Sidebar
-              conversations={allConversations}
+              conversations={allConversations.map((c) => ({
+                id: c.id,
+                title: c.title,
+                colors: colorsFor(c.referencedProjectTitles)
+              }))}
               activeId={activeId}
               onSelect={selectConversation}
               onNew={createConversation}
@@ -584,7 +678,8 @@ export default function ChatWindow({
             background: 'var(--surface-app)',
             borderTop: 'var(--hairline)',
             borderLeft: 'var(--hairline)',
-            borderTopLeftRadius: 'var(--radius-xl)'
+            borderTopLeftRadius: 'var(--radius-xl)',
+            overflow: 'hidden'
           }}
         >
           {route === 'projects' ? (
@@ -602,7 +697,13 @@ export default function ChatWindow({
             </span>
           </div>
         ) : route === 'project' && activeProjectId ? (
-          <ProjectDetailView projectId={activeProjectId} onBack={() => setRoute('projects')} />
+          <ProjectDetailView
+            projectId={activeProjectId}
+            onBack={() => setRoute('projects')}
+            onColorChange={(id, color) =>
+              setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, color } : p)))
+            }
+          />
         ) : (
         <>
         <nav
@@ -623,7 +724,18 @@ export default function ChatWindow({
             {active ? active.title : 'No conversation'}
           </span>
         </nav>
-        <div ref={scrollRef} className="chatscroll chatscroll-fade" style={{ flex: '1 1 auto', overflowY: 'auto', overflowX: 'hidden' }}>
+        <div
+          ref={scrollRef}
+          className="chatscroll"
+          onScroll={updateFadeEdges}
+          style={{
+            flex: '1 1 auto',
+            overflowY: 'auto',
+            overflowX: 'hidden',
+            maskImage: fadeMask(fadeEdges),
+            WebkitMaskImage: fadeMask(fadeEdges)
+          }}
+        >
           {active && messages.length > 0 ? (
             <div
               style={{
@@ -635,35 +747,46 @@ export default function ChatWindow({
                 gap: '26px'
               }}
             >
-              {messages.map((m) => (
-                <div
-                  key={m.id}
-                  style={{ display: 'flex', justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start' }}
-                >
-                  <div style={m.role === 'user' ? userBubbleStyle : botBubbleStyle}>
-                    {m.parts.map((part, i) =>
-                      part.kind === 'context' ? (
-                        <span key={i} style={contextBlockStyle}>
-                          {part.text}
-                        </span>
-                      ) : part.kind === 'tool' ? (
-                        <span key={i}>
-                          <span title={part.query} style={toolBadgeStyle}>
-                            <strong style={{ fontWeight: 'var(--weight-medium)' }}>{part.name}</strong>
-                            <span style={{ color: 'var(--text-muted)' }}>
-                              {part.query.length > 40 ? `${part.query.slice(0, 40)}…` : part.query}
-                            </span>
-                          </span>
-                          <br />
-                        </span>
-                      ) : (
-                        <span key={i}>{part.text}</span>
-                      )
-                    )}
-                    {streamingHere && last && m.id === last.id ? CARET : null}
+              {messages.map((m) => {
+                const contextBadges = renderContextBadges(m.parts)
+                return (
+                  <div
+                    key={m.id}
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: contextBadges.length > 0 ? '10px' : '6px',
+                      alignItems: m.role === 'user' ? 'flex-end' : 'flex-start'
+                    }}
+                  >
+                    {contextBadges.length > 0 ? (
+                      <div
+                        style={{
+                          display: 'flex',
+                          width: '100%',
+                          justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start'
+                        }}
+                      >
+                        <div style={{ ...botBubbleStyle, display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                          {contextBadges}
+                        </div>
+                      </div>
+                    ) : null}
+                    <div
+                      style={{
+                        display: 'flex',
+                        width: '100%',
+                        justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start'
+                      }}
+                    >
+                      <div style={m.role === 'user' ? userBubbleStyle : botBubbleStyle}>
+                        {renderParts(m.parts)}
+                        {streamingHere && last && m.id === last.id ? CARET : null}
+                      </div>
+                    </div>
                   </div>
-                </div>
-              ))}
+                )
+              })}
             </div>
           ) : (
             <div

@@ -3,6 +3,7 @@ import 'dotenv/config'
 const NOTION_VERSION = '2025-09-03'
 const CHAT_LOG_DATA_SOURCE_ID = 'efe919c7-c9c1-404e-ac41-2b5210790815'
 const PROJECTS_PAGE_ID = '31bb837d9c3180ab9ed4fd1eb7e752a9'
+const CONFIG_PAGE_ID = '3c6b837d9c31801a9e5df548713eca5e'
 
 function headers(): Record<string, string> {
     const apiKey = process.env.NOTION_API_KEY
@@ -66,6 +67,8 @@ export interface ChatToolCall {
 export interface ChatMessage {
     content: string
     tools: ChatToolCall[]
+    /** Titles of the projects injected into this message. */
+    projects: string[]
 }
 
 export type ChatTranscriptMessage = ChatMessage & { role: 'user' | 'assistant' }
@@ -124,7 +127,7 @@ function toRichText(text: string): Array<{ type: 'text'; text: { content: string
 
 function codeBlockBody(messages: ChatMessage[]): Record<string, unknown> {
     const document: ChatTranscriptDocument = {
-        messages: messages.map((m) => ({ content: m.content, tools: m.tools }))
+        messages: messages.map((m) => ({ content: m.content, tools: m.tools, projects: m.projects }))
     }
     return {
         object: 'block',
@@ -236,7 +239,9 @@ function normalizeMessage(raw: unknown): ChatMessage | null {
               .map((t) => ({ name: String(t.name ?? 'tool'), query: String(t.query ?? '') }))
         : []
 
-    return { content: String(m.content ?? ''), tools }
+    const projects = Array.isArray(m.projects) ? m.projects.filter((p): p is string => typeof p === 'string') : []
+
+    return { content: String(m.content ?? ''), tools, projects }
 }
 
 /**
@@ -251,7 +256,7 @@ function parseLegacyBlocks(blocks: NotionBlock[]): ChatMessage[] {
     for (const block of blocks) {
         if (block.type === 'heading_3') {
             if (current) messages.push(current)
-            current = { content: '', tools: [] }
+            current = { content: '', tools: [], projects: [] }
             continue
         }
 
@@ -301,6 +306,7 @@ export interface ProjectEntry {
     title: string
     lastEdited: string | null
     preview: string
+    color: string | null
 }
 
 /** First non-empty paragraph among a page's top-level blocks — used as the card preview. */
@@ -311,6 +317,8 @@ function firstPreview(blocks: NotionBlock[]): string {
     }
     return ''
 }
+
+const HEX_COLOR = /^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/
 
 async function fetchPageLastEdited(pageId: string): Promise<string | null> {
     const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, { headers: headers() })
@@ -334,7 +342,8 @@ export async function fetchProjects(): Promise<ProjectEntry[]> {
                 id: block.id,
                 title: block.child_page?.title ?? '',
                 lastEdited,
-                preview: firstPreview(children)
+                preview: firstPreview(children),
+                color: (await fetchClaudeMd(children)).color
             }
         })
     )
@@ -437,24 +446,51 @@ export interface ProjectDetail {
     title: string
     lastEdited: string | null
     instructions: string
+    color: string | null
     blocks: ProjectDetailBlock[]
 }
 
 function isInstructionsPage(block: NotionBlock): boolean {
-    return block.type === 'child_page' && block.child_page?.title?.trim().toLowerCase() === 'instructions'
+    return block.type === 'child_page' && block.child_page?.title?.trim().toLowerCase() === 'claude.md'
 }
 
-/** Instructions come only from a dedicated child page named "Instructions" — no such page means no instructions. */
-async function fetchInstructions(blocks: NotionBlock[]): Promise<string> {
-    const page = blocks.find(isInstructionsPage)
-    if (!page) return ''
+interface ClaudeMdData {
+    instructions: string
+    color: string | null
+}
 
-    const children = await fetchBlockChildren(page.id)
+const EMPTY_CLAUDE_MD: ClaudeMdData = { instructions: '', color: null }
+
+/** The "CLAUDE.md" page's body: a single `json` code block, falling back to its raw text if it isn't parseable JSON. */
+async function readClaudeMdText(pageId: string): Promise<string> {
+    const children = await fetchBlockChildren(pageId)
+    const codeBlock = children.find((b) => b.type === 'code')
+    if (codeBlock) return plainText(codeBlock.code?.rich_text)
+
     return children
         .map((b) => toDetailBlock(b))
         .filter((b): b is ProjectDetailBlock => b !== null && b.text.trim().length > 0)
         .map((b) => b.text)
         .join('\n')
+}
+
+function parseClaudeMd(text: string): ClaudeMdData {
+    try {
+        const parsed = JSON.parse(text) as { instructions?: unknown; color?: unknown }
+        const instructions = typeof parsed.instructions === 'string' ? parsed.instructions : ''
+        const color = typeof parsed.color === 'string' && HEX_COLOR.test(parsed.color) ? parsed.color : null
+        return { instructions, color }
+    } catch {
+        return { instructions: text, color: null }
+    }
+}
+
+/** Instructions and color come only from a dedicated "CLAUDE.md" child page — no such page means neither. */
+async function fetchClaudeMd(blocks: NotionBlock[]): Promise<ClaudeMdData> {
+    const page = blocks.find(isInstructionsPage)
+    if (!page) return EMPTY_CLAUDE_MD
+
+    return parseClaudeMd(await readClaudeMdText(page.id))
 }
 
 async function createChildPage(parentId: string, title: string): Promise<string> {
@@ -473,16 +509,6 @@ async function createChildPage(parentId: string, title: string): Promise<string>
     return data.id
 }
 
-async function clearBlockChildren(blockId: string): Promise<void> {
-    const children = await fetchBlockChildren(blockId)
-    await Promise.all(
-        children.map(async (b) => {
-            const res = await fetch(`https://api.notion.com/v1/blocks/${b.id}`, { method: 'DELETE', headers: headers() })
-            if (!res.ok) throw new Error(`Notion block delete failed: ${res.status} ${await res.text()}`)
-        })
-    )
-}
-
 async function setParagraphs(blockId: string, text: string): Promise<void> {
     const children = text
         .split('\n')
@@ -498,14 +524,28 @@ async function setParagraphs(blockId: string, text: string): Promise<void> {
     }
 }
 
-/** Rewrites the dedicated "Instructions" child page with `text`, creating the page first if it doesn't exist yet. */
-export async function updateProjectInstructions(projectId: string, text: string): Promise<void> {
+/** Finds the project's "CLAUDE.md" child page, creating it if it doesn't exist yet, alongside its current parsed data. */
+async function getOrCreateClaudeMd(projectId: string): Promise<{ id: string; current: ClaudeMdData }> {
     const blocks = await fetchBlockChildren(projectId)
     const existing = blocks.find(isInstructionsPage)
-    const instructionsId = existing ? existing.id : await createChildPage(projectId, 'instructions')
+    if (existing) return { id: existing.id, current: parseClaudeMd(await readClaudeMdText(existing.id)) }
 
-    await clearBlockChildren(instructionsId)
-    if (text.trim()) await setParagraphs(instructionsId, text)
+    const id = await createChildPage(projectId, 'CLAUDE.md')
+    return { id, current: EMPTY_CLAUDE_MD }
+}
+
+/** Rewrites the dedicated "CLAUDE.md" child page's JSON body with `text` as the instructions, preserving its color. */
+export async function updateProjectInstructions(projectId: string, text: string): Promise<void> {
+    const { id, current } = await getOrCreateClaudeMd(projectId)
+    const data: ClaudeMdData = { instructions: text, color: current.color }
+    await replaceCodeBlock(id, 'json', JSON.stringify(data, null, 2))
+}
+
+/** Rewrites the dedicated "CLAUDE.md" child page's JSON body with `color`, preserving its instructions. */
+export async function updateProjectColor(projectId: string, color: string): Promise<void> {
+    const { id, current } = await getOrCreateClaudeMd(projectId)
+    const data: ClaudeMdData = { instructions: current.instructions, color }
+    await replaceCodeBlock(id, 'json', JSON.stringify(data, null, 2))
 }
 
 async function clearNonChildPageBlocks(blockId: string): Promise<void> {
@@ -541,7 +581,7 @@ export async function fetchProjectDetail(pageId: string): Promise<ProjectDetail>
     const titleProp = page.properties?.title as { title?: NotionRichText[] } | undefined
 
     const blocks = await fetchBlockChildren(pageId)
-    const instructions = await fetchInstructions(blocks)
+    const { instructions, color } = await fetchClaudeMd(blocks)
     const contentBlocks = blocks.filter((b) => !isInstructionsPage(b))
 
     return {
@@ -549,6 +589,7 @@ export async function fetchProjectDetail(pageId: string): Promise<ProjectDetail>
         title: plainText(titleProp?.title),
         lastEdited: page.last_edited_time ?? null,
         instructions,
+        color,
         blocks: contentBlocks.map(toDetailBlock).filter((b): b is ProjectDetailBlock => b !== null)
     }
 }
@@ -571,12 +612,60 @@ export async function fetchProjectContext(projectId: string): Promise<string> {
     )
 
     const parts: string[] = []
-    if (detail.instructions.trim()) parts.push(`Instructions:\n${detail.instructions.trim()}`)
+    if (detail.instructions.trim()) parts.push(`guidelines:\n${detail.instructions.trim()}`)
     for (const p of pageTexts) {
-        if (p.text.trim()) parts.push(`${p.title}:\n${p.text.trim()}`)
+        if (p.text.trim()) parts.push(`title: ${p.title}\ncontent: ${p.text.trim()}`)
     }
 
     return parts.join('\n\n')
+}
+
+function isProjectMarkdownPage(block: NotionBlock): boolean {
+    return block.type === 'child_page' && block.child_page?.title?.trim().toLowerCase() === 'project.md'
+}
+
+/** Rewrites the page's single code block with `text`, creating it if it doesn't exist yet. */
+async function replaceCodeBlock(pageId: string, language: string, text: string): Promise<void> {
+    const blocks = await fetchBlockChildren(pageId)
+    const codeBlock = blocks.find((b) => b.type === 'code')
+    const code = { language, rich_text: toRichText(text) }
+
+    if (codeBlock) {
+        const res = await fetch(`https://api.notion.com/v1/blocks/${codeBlock.id}`, {
+            method: 'PATCH',
+            headers: headers(),
+            body: JSON.stringify({ code })
+        })
+        if (!res.ok) throw new Error(`Notion code block update failed: ${res.status} ${await res.text()}`)
+        return
+    }
+
+    const res = await fetch(`https://api.notion.com/v1/blocks/${pageId}/children`, {
+        method: 'PATCH',
+        headers: headers(),
+        body: JSON.stringify({ children: [{ object: 'block', type: 'code', code }] })
+    })
+    if (!res.ok) throw new Error(`Notion code block create failed: ${res.status} ${await res.text()}`)
+}
+
+/** Reads the "PROJECT.md" child page under the Config page — empty string if it doesn't exist yet. */
+export async function fetchProjectMarkdown(): Promise<string> {
+    const blocks = await fetchBlockChildren(CONFIG_PAGE_ID)
+    const page = blocks.find(isProjectMarkdownPage)
+    if (!page) return ''
+
+    const children = await fetchBlockChildren(page.id)
+    const codeBlock = children.find((b) => b.type === 'code')
+    return codeBlock ? plainText(codeBlock.code?.rich_text) : ''
+}
+
+/** Rewrites the "PROJECT.md" child page under the Config page with `text`, creating the page first if needed. */
+export async function saveProjectMarkdown(text: string): Promise<void> {
+    const blocks = await fetchBlockChildren(CONFIG_PAGE_ID)
+    const existing = blocks.find(isProjectMarkdownPage)
+    const pageId = existing ? existing.id : await createChildPage(CONFIG_PAGE_ID, 'PROJECT.md')
+
+    await replaceCodeBlock(pageId, 'markdown', text)
 }
 
 /** Appends a single paragraph block holding `text` to the project page. */

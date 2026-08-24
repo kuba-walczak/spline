@@ -14,11 +14,14 @@ import {
   fetchChatTranscript,
   fetchProjectContext,
   fetchProjectDetail,
+  fetchProjectMarkdown,
   fetchProjects,
+  saveProjectMarkdown,
   setChatProject,
   updateContextPageContent,
   updateLastActive,
   updatePageTitle,
+  updateProjectColor,
   updateProjectInstructions,
   updateProjectTitle,
   type ChatMessage
@@ -251,10 +254,22 @@ ipcMain.handle('notion:updateProjectInstructions', async (_event, projectId: str
   await updateProjectInstructions(projectId, text)
 })
 
+ipcMain.handle('notion:updateProjectColor', async (_event, projectId: string, color: string) => {
+  await updateProjectColor(projectId, color)
+})
+
 ipcMain.handle('notion:updateContextPageContent', async (_event, pageId: string, text: string) => {
   await updateContextPageContent(pageId, text)
 })
 
 ipcMain.handle('notion:createContextPage', async (_event, projectId: string, title: string, text: string) => {
   return createContextPage(projectId, title, text)
+})
+
+ipcMain.handle('notion:getProjectMarkdown', async () => {
+  return fetchProjectMarkdown()
+})
+
+ipcMain.handle('notion:saveProjectMarkdown', async (_event, text: string) => {
+  await saveProjectMarkdown(text)
 })

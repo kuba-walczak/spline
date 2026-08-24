@@ -12,11 +12,20 @@ import { SegmentedControl } from '@/components/ui/segmented-control'
 export interface SidebarConversation {
   id: number
   title: string
+  colors?: string[]
+}
+
+/** Right-to-left tint: one color fades to transparent, several are spread as stops before the fade. */
+function tintGradient(colors: string[]): string | undefined {
+  if (colors.length === 0) return undefined
+  if (colors.length === 1) return `linear-gradient(to right, ${colors[0]}, transparent)`
+  return `linear-gradient(to right, ${colors.join(', ')}, transparent)`
 }
 
 export interface SidebarProject {
   id: string
   title: string
+  color: string | null
 }
 
 export interface SidebarProps {
@@ -52,6 +61,18 @@ function ChatRow({ conversation, active, onSelect, onDelete }: ChatRowProps): Re
       onMouseLeave={() => setHover(false)}
     >
       <NavItem icon="message-circle" label={conversation.title} active={active} onClick={onSelect} />
+      {conversation.colors && conversation.colors.length > 0 ? (
+        <div
+          style={{
+            position: 'absolute',
+            inset: 0,
+            borderRadius: 'var(--radius-sm)',
+            background: tintGradient(conversation.colors),
+            mixBlendMode: 'screen',
+            pointerEvents: 'none'
+          }}
+        />
+      ) : null}
       {hover || menuOpen ? (
         <div
           style={{
@@ -195,13 +216,26 @@ export function Sidebar({
             {projects.length > 0 ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--row-gap)' }}>
                 {projects.map((p) => (
-                  <NavItem
-                    key={p.id}
-                    icon="folder"
-                    label={p.title}
-                    active={p.id === activeProjectId}
-                    onClick={() => onSelectProject(p.id)}
-                  />
+                  <div key={p.id} style={{ position: 'relative' }}>
+                    <NavItem
+                      icon="folder"
+                      label={p.title}
+                      active={p.id === activeProjectId}
+                      onClick={() => onSelectProject(p.id)}
+                    />
+                    {p.color ? (
+                      <div
+                        style={{
+                          position: 'absolute',
+                          inset: 0,
+                          borderRadius: 'var(--radius-sm)',
+                          background: `linear-gradient(to right, ${p.color}, transparent)`,
+                          mixBlendMode: 'screen',
+                          pointerEvents: 'none'
+                        }}
+                      />
+                    ) : null}
+                  </div>
                 ))}
               </div>
             ) : (

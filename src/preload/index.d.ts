@@ -9,6 +9,7 @@ interface ChatToolCall {
 interface ChatMessage {
   content: string
   tools: ChatToolCall[]
+  projects: string[]
 }
 
 type ChatTranscriptMessage = ChatMessage & { role: 'user' | 'assistant' }
@@ -31,7 +32,9 @@ declare global {
       updatePageTitle: (pageId: string, name: string) => Promise<void>
       setChatProject: (pageId: string, projectTitle: string) => Promise<void>
       archiveChatPage: (pageId: string) => Promise<void>
-      getProjects: () => Promise<Array<{ id: string; title: string; lastEdited: string | null; preview: string }>>
+      getProjects: () => Promise<
+        Array<{ id: string; title: string; lastEdited: string | null; preview: string; color: string | null }>
+      >
       createProject: (title: string) => Promise<string>
       updateProjectTitle: (pageId: string, title: string) => Promise<void>
       getProjectDetail: (pageId: string) => Promise<{
@@ -39,13 +42,17 @@ declare global {
         title: string
         lastEdited: string | null
         instructions: string
+        color: string | null
         blocks: Array<{ id: string; type: string; text: string; checked?: boolean; url?: string }>
       }>
       getProjectContext: (projectId: string) => Promise<string>
       appendProjectNote: (pageId: string, text: string) => Promise<void>
       updateProjectInstructions: (projectId: string, text: string) => Promise<void>
+      updateProjectColor: (projectId: string, color: string) => Promise<void>
       updateContextPageContent: (pageId: string, text: string) => Promise<void>
       createContextPage: (projectId: string, title: string, text: string) => Promise<string>
+      getProjectMarkdown: () => Promise<string>
+      saveProjectMarkdown: (text: string) => Promise<void>
     }
   }
 }

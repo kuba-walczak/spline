@@ -24,6 +24,7 @@ interface ProjectDetail {
   title: string
   lastEdited: string | null
   instructions: string
+  color: string | null
   blocks: DetailBlock[]
 }
 
@@ -328,18 +329,20 @@ function ContextPageView({
 
   return (
     <main
-      className="chatscroll"
       style={{
         flex: '1 1 auto',
         minWidth: 0,
         minHeight: 0,
-        overflowY: 'auto',
-        overflowX: 'hidden',
-        background: 'var(--surface-app)'
+        display: 'flex',
+        flexDirection: 'column',
+        background: 'var(--surface-app)',
+        borderTopLeftRadius: 'var(--radius-xl)',
+        overflow: 'hidden'
       }}
     >
       <nav
         style={{
+          flex: '0 0 auto',
           display: 'flex',
           alignItems: 'center',
           gap: 'var(--space-4)',
@@ -373,6 +376,10 @@ function ContextPageView({
         <span style={{ color: 'var(--text-primary)' }}>{title}</span>
       </nav>
 
+      <div
+        className="chatscroll"
+        style={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}
+      >
       <div
         style={{
           width: '100%',
@@ -468,6 +475,7 @@ function ContextPageView({
         </div>
         )}
       </div>
+      </div>
     </main>
   )
 }
@@ -517,18 +525,20 @@ function NewContextPageView({
 
   return (
     <main
-      className="chatscroll"
       style={{
         flex: '1 1 auto',
         minWidth: 0,
         minHeight: 0,
-        overflowY: 'auto',
-        overflowX: 'hidden',
-        background: 'var(--surface-app)'
+        display: 'flex',
+        flexDirection: 'column',
+        background: 'var(--surface-app)',
+        borderTopLeftRadius: 'var(--radius-xl)',
+        overflow: 'hidden'
       }}
     >
       <nav
         style={{
+          flex: '0 0 auto',
           display: 'flex',
           alignItems: 'center',
           gap: 'var(--space-4)',
@@ -562,6 +572,10 @@ function NewContextPageView({
         <span style={{ color: 'var(--text-primary)' }}>{title || 'Untitled'}</span>
       </nav>
 
+      <div
+        className="chatscroll"
+        style={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}
+      >
       <div
         style={{
           width: '100%',
@@ -604,6 +618,7 @@ function NewContextPageView({
           style={editTextareaStyle}
         />
       </div>
+      </div>
     </main>
   )
 }
@@ -611,9 +626,12 @@ function NewContextPageView({
 export interface ProjectDetailViewProps {
   projectId: string
   onBack: () => void
+  onColorChange?: (projectId: string, color: string) => void
 }
 
-export default function ProjectDetailView({ projectId, onBack }: ProjectDetailViewProps): ReactElement {
+const DEFAULT_COLOR = '#8a8a86'
+
+export default function ProjectDetailView({ projectId, onBack, onColorChange }: ProjectDetailViewProps): ReactElement {
   const [detail, setDetail] = useState<ProjectDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
@@ -627,6 +645,8 @@ export default function ProjectDetailView({ projectId, onBack }: ProjectDetailVi
   const [editingInstructions, setEditingInstructions] = useState(false)
   const [instructionsDraft, setInstructionsDraft] = useState('')
   const [savingInstructions, setSavingInstructions] = useState(false)
+  const [colorDraft, setColorDraft] = useState<string | null>(null)
+  const [savingColor, setSavingColor] = useState(false)
 
   function loadContext(id: string): void {
     setContextLoading(true)
@@ -695,9 +715,26 @@ export default function ProjectDetailView({ projectId, onBack }: ProjectDetailVi
     }
   }
 
+  async function syncColor(next: string): Promise<void> {
+    if (savingColor) return
+    setSavingColor(true)
+    try {
+      await window.api.updateProjectColor(projectId, next)
+      setDetail((d) => (d ? { ...d, color: next } : d))
+      setColorDraft(null)
+      onColorChange?.(projectId, next)
+    } catch (err) {
+      console.error('[project] updateProjectColor failed:', err)
+    } finally {
+      setSavingColor(false)
+    }
+  }
+
   const blocks = detail?.blocks ?? []
   const recents = blocks.filter((b) => b.type === 'child_page')
   const instructions = detail?.instructions ?? ''
+  const color = colorDraft ?? detail?.color ?? DEFAULT_COLOR
+  const colorDirty = colorDraft !== null && colorDraft !== detail?.color
 
   const title = detail?.title || 'Untitled'
   const emptyStyle: CSSProperties = {
@@ -741,18 +778,20 @@ export default function ProjectDetailView({ projectId, onBack }: ProjectDetailVi
 
   return (
     <main
-      className="chatscroll"
       style={{
         flex: '1 1 auto',
         minWidth: 0,
         minHeight: 0,
-        overflowY: 'auto',
-        overflowX: 'hidden',
-        background: 'var(--surface-app)'
+        display: 'flex',
+        flexDirection: 'column',
+        background: 'var(--surface-app)',
+        borderTopLeftRadius: 'var(--radius-xl)',
+        overflow: 'hidden'
       }}
     >
       <nav
         style={{
+          flex: '0 0 auto',
           display: 'flex',
           alignItems: 'center',
           gap: 'var(--space-4)',
@@ -775,6 +814,10 @@ export default function ProjectDetailView({ projectId, onBack }: ProjectDetailVi
         <span style={{ color: 'var(--text-primary)' }}>{title}</span>
       </nav>
 
+      <div
+        className="chatscroll"
+        style={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}
+      >
       <div
         style={{
           width: '100%',
@@ -824,6 +867,48 @@ export default function ProjectDetailView({ projectId, onBack }: ProjectDetailVi
               overflow: 'hidden'
             }}
           >
+            <div style={panelStyle()}>
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 'var(--space-6)',
+                  marginBottom: 'var(--space-3)'
+                }}
+              >
+                <h3 style={headingStyle}>Color</h3>
+                {colorDirty ? (
+                  <IconButton
+                    icon="refresh-cw"
+                    label="Sync to Notion"
+                    size="sm"
+                    onClick={() => void syncColor(color)}
+                    disabled={savingColor}
+                  />
+                ) : null}
+              </div>
+              <label
+                style={{
+                  display: 'block',
+                  width: '100%',
+                  height: 28,
+                  boxSizing: 'border-box',
+                  borderRadius: 'var(--radius-sm)',
+                  background: color,
+                  border: '1px solid var(--border-default)',
+                  cursor: 'pointer'
+                }}
+              >
+                <input
+                  type="color"
+                  value={color}
+                  onChange={(e) => setColorDraft(e.target.value)}
+                  style={{ width: 0, height: 0, opacity: 0, position: 'absolute' }}
+                />
+              </label>
+            </div>
+
             <div style={panelStyle()}>
               <div
                 style={{
@@ -900,6 +985,7 @@ export default function ProjectDetailView({ projectId, onBack }: ProjectDetailVi
             </div>
           </aside>
         </div>
+      </div>
       </div>
     </main>
   )

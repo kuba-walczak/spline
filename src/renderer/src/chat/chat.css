@@ -20,10 +20,6 @@ a:hover {
 .chatscroll {
   scrollbar-gutter: stable both-edges;
 }
-.chatscroll-fade {
-  mask-image: linear-gradient(to bottom, transparent, black 128px, black calc(100% - 128px), transparent);
-  -webkit-mask-image: linear-gradient(to bottom, transparent, black 128px, black calc(100% - 128px), transparent);
-}
 .chatscroll::-webkit-scrollbar {
   width: 10px;
 }
