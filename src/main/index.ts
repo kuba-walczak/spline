@@ -6,6 +6,7 @@ import {
   askClaude,
   claudeEvents,
   consumeNeedsGuidelines,
+  generateChatTitle,
   getClaudeEffort,
   getClaudeModel,
   setClaudeEffort,
@@ -21,12 +22,14 @@ import {
   createProjectPage,
   fetchChatLog,
   fetchChatMarkdown,
+  fetchTitleMarkdown,
   fetchChatTranscript,
   fetchProjectContext,
   fetchProjectDetail,
   fetchProjectMarkdown,
   fetchProjects,
   saveChatMarkdown,
+  saveTitleMarkdown,
   saveProjectMarkdown,
   setChatProjects,
   updateContextPageContent,
@@ -206,6 +209,10 @@ ipcMain.handle('claude:setEffort', (_event, effort: string) => {
   setClaudeEffort(effort)
 })
 
+ipcMain.handle('claude:generateTitle', async (_event, prompt: string) => {
+  return generateChatTitle(prompt)
+})
+
 ipcMain.handle('chat:open', () => {
   createChatWindow()
 })
@@ -311,4 +318,12 @@ ipcMain.handle('notion:getChatMarkdown', async () => {
 
 ipcMain.handle('notion:saveChatMarkdown', async (_event, text: string) => {
   await saveChatMarkdown(text)
+})
+
+ipcMain.handle('notion:getTitleMarkdown', async () => {
+  return fetchTitleMarkdown()
+})
+
+ipcMain.handle('notion:saveTitleMarkdown', async (_event, text: string) => {
+  await saveTitleMarkdown(text)
 })

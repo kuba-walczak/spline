@@ -27,6 +27,7 @@ declare global {
       setClaudeModel: (model: string) => Promise<void>
       getClaudeEffort: () => Promise<string>
       setClaudeEffort: (effort: string) => Promise<void>
+      generateChatTitle: (prompt: string) => Promise<string>
       onClaudeEvent: (callback: (event: Record<string, unknown>) => void) => () => void
       openChatWindow: () => Promise<void>
       getChatLog: () => Promise<
@@ -63,6 +64,8 @@ declare global {
       saveProjectMarkdown: (text: string) => Promise<void>
       getChatMarkdown: () => Promise<string>
       saveChatMarkdown: (text: string) => Promise<void>
+      getTitleMarkdown: () => Promise<string>
+      saveTitleMarkdown: (text: string) => Promise<void>
     }
   }
 }

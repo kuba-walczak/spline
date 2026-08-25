@@ -8,9 +8,9 @@ import { IconButton } from '@/components/ui/icon-button'
 
    Each textbox round-trips through Notion the same way Instructions/Context do
    elsewhere in the app: draft state, dirty check against the loaded value,
-   explicit sync via the refresh-cw button. Stored as PROJECT.md / CHAT.md
-   under the Config page (see NotionService.fetch/saveProjectMarkdown and
-   fetch/saveChatMarkdown). */
+   explicit sync via the refresh-cw button. Stored as PROJECT.md / CHAT.md /
+   TITLE.md under the Config page (see NotionService.fetch/saveProjectMarkdown,
+   fetch/saveChatMarkdown, fetch/saveTitleMarkdown). */
 
 export interface SettingsModalProps {
   onClose: () => void
@@ -28,6 +28,12 @@ export function SettingsModal({ onClose }: SettingsModalProps): ReactElement {
   const [chatLoading, setChatLoading] = useState(true)
   const [chatSaving, setChatSaving] = useState(false)
   const chatDirty = chatDraft !== chatOriginal
+
+  const [titleOriginal, setTitleOriginal] = useState('')
+  const [titleDraft, setTitleDraft] = useState('')
+  const [titleLoading, setTitleLoading] = useState(true)
+  const [titleSaving, setTitleSaving] = useState(false)
+  const titleDirty = titleDraft !== titleOriginal
 
   useEffect(() => {
     window.api
@@ -47,6 +53,15 @@ export function SettingsModal({ onClose }: SettingsModalProps): ReactElement {
       })
       .catch((err) => console.error('[settings] getChatMarkdown failed:', err))
       .finally(() => setChatLoading(false))
+
+    window.api
+      .getTitleMarkdown()
+      .then((text) => {
+        setTitleOriginal(text)
+        setTitleDraft(text)
+      })
+      .catch((err) => console.error('[settings] getTitleMarkdown failed:', err))
+      .finally(() => setTitleLoading(false))
   }, [])
 
   async function sync(): Promise<void> {
@@ -72,6 +87,19 @@ export function SettingsModal({ onClose }: SettingsModalProps): ReactElement {
       console.error('[settings] saveChatMarkdown failed:', err)
     } finally {
       setChatSaving(false)
+    }
+  }
+
+  async function syncTitle(): Promise<void> {
+    if (titleSaving || !titleDirty) return
+    setTitleSaving(true)
+    try {
+      await window.api.saveTitleMarkdown(titleDraft)
+      setTitleOriginal(titleDraft)
+    } catch (err) {
+      console.error('[settings] saveTitleMarkdown failed:', err)
+    } finally {
+      setTitleSaving(false)
     }
   }
 
@@ -273,6 +301,68 @@ export function SettingsModal({ onClose }: SettingsModalProps): ReactElement {
               onChange={(e) => setChatDraft(e.target.value)}
               placeholder={chatLoading ? 'Loading…' : ''}
               disabled={chatLoading}
+              style={{
+                width: '100%',
+                maxWidth: '710px',
+                minHeight: '160px',
+                boxSizing: 'border-box',
+                padding: '14px 16px',
+                background: 'var(--surface-inset)',
+                border: '1px solid var(--border-default)',
+                borderRadius: 'var(--radius-md)',
+                color: 'var(--text-body)',
+                font: 'var(--weight-regular) var(--text-base)/1.5 var(--font-mono)',
+                resize: 'vertical',
+                outline: 'none',
+                boxShadow: 'none'
+              }}
+            />
+
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'space-between',
+                gap: '16px',
+                margin: '32px 0 8px',
+                maxWidth: '710px'
+              }}
+            >
+              <h2
+                style={{
+                  margin: 0,
+                  font: 'var(--weight-semibold) var(--text-lg)/1.3 var(--font-sans)',
+                  letterSpacing: 'var(--tracking-tight)',
+                  color: 'var(--text-primary)'
+                }}
+              >
+                Title
+              </h2>
+              {titleDirty ? (
+                <IconButton
+                  icon="refresh-cw"
+                  label="Sync to Notion"
+                  size="sm"
+                  onClick={() => void syncTitle()}
+                  disabled={titleSaving}
+                />
+              ) : null}
+            </div>
+            <p
+              style={{
+                margin: '0 0 20px',
+                font: 'var(--weight-regular) var(--text-base)/1.45 var(--font-sans)',
+                letterSpacing: 'var(--tracking-tight)',
+                color: 'var(--text-muted)'
+              }}
+            >
+              The prompt sent when generating a chat's title.
+            </p>
+            <textarea
+              value={titleDraft}
+              onChange={(e) => setTitleDraft(e.target.value)}
+              placeholder={titleLoading ? 'Loading…' : ''}
+              disabled={titleLoading}
               style={{
                 width: '100%',
                 maxWidth: '710px',

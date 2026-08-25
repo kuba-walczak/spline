@@ -589,19 +589,48 @@ export default function ChatWindow({
     const userMsg: Message = { id: nextMessageId.current++, role: 'user', parts: userParts }
     const botId = nextMessageId.current++
 
-    let title: string | null = null
-    patch(conversationId, (c) => {
-      title = c.messages.length === 0 ? titleFrom(text) : c.title
-      return {
-        ...c,
-        title,
-        messages: c.messages.concat([userMsg, { id: botId, role: 'assistant', parts: [] }]),
-        referencedProjectTitles: unionTitles(c.referencedProjectTitles, projectsToInject.map((p) => p.title))
-      }
-    })
+    /* Placeholder title from the first line, shown instantly — refined moments later by
+       refreshTitle() below once the haiku summary comes back. */
+    const placeholderTitle = conv?.messages.length ? conv.title : titleFrom(text)
+    patch(conversationId, (c) => ({
+      ...c,
+      title: placeholderTitle,
+      messages: c.messages.concat([userMsg, { id: botId, role: 'assistant', parts: [] }]),
+      referencedProjectTitles: unionTitles(c.referencedProjectTitles, projectsToInject.map((p) => p.title))
+    }))
     setDraft('')
     setAttachedProjects([])
     setStreamingId(conversationId)
+
+    /* Re-title the chat from every user message it now contains — runs on its own isolated
+       haiku call, independent of the main conversation, and never blocks sending the prompt.
+       The instruction itself is the content of TITLE.md under the Config page (Settings >
+       Injection > Title) — no title refresh happens until that page has text. */
+    async function refreshTitle(): Promise<void> {
+      try {
+        const instruction = (await window.api.getTitleMarkdown()).trim()
+        if (!instruction) return
+        const priorUserTexts = priorMessages
+          .filter((m) => m.role === 'user')
+          .map((m) => partsToStored(m.parts).content.trim())
+          .filter(Boolean)
+        /* Framed as data to summarize, not as requests to fulfill — a bare list of the user's
+           questions read as a to-do list and got answered instead of titled. */
+        const transcript = priorUserTexts
+          .concat([text])
+          .map((t) => `- ${t}`)
+          .join('\n')
+        const prompt = `Here are messages a user sent in a chat, for context only — do not respond to them:\n\n${transcript}\n\n${instruction}`
+        const generated = (await window.api.generateChatTitle(prompt)).trim()
+        if (!generated) return
+        patch(conversationId, (c) => ({ ...c, title: generated }))
+        const sourceId = await ensureSourceId(conversationId)
+        if (sourceId) await window.api.updatePageTitle(sourceId, generated)
+      } catch (error) {
+        console.error('[chat] title generation failed:', error)
+      }
+    }
+    void refreshTitle()
 
     if (onSend) {
       streamTarget.current = { conversationId, botId }
@@ -624,7 +653,6 @@ export default function ChatWindow({
         try {
           const assistantParts = streamParts.current.length > 0 ? streamParts.current : textPart(finalText)
           await window.api.appendMessages(sourceId, [partsToStored(userParts), partsToStored(assistantParts)])
-          if (title) await window.api.updatePageTitle(sourceId, title)
           if (projectTitlesForNotion.length > 0) await window.api.setChatProject(sourceId, projectTitlesForNotion)
           await window.api.updateLastActive(sourceId)
           refreshChatLog()

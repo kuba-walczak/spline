@@ -19,6 +19,7 @@ const api = {
   setClaudeModel: (model: string) => ipcRenderer.invoke('claude:setModel', model) as Promise<void>,
   getClaudeEffort: () => ipcRenderer.invoke('claude:getEffort') as Promise<string>,
   setClaudeEffort: (effort: string) => ipcRenderer.invoke('claude:setEffort', effort) as Promise<void>,
+  generateChatTitle: (prompt: string) => ipcRenderer.invoke('claude:generateTitle', prompt) as Promise<string>,
   onClaudeEvent: (callback: (event: Record<string, unknown>) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, data: Record<string, unknown>): void => callback(data)
     ipcRenderer.on('claude:event', listener)
@@ -82,7 +83,9 @@ const api = {
   getProjectMarkdown: () => ipcRenderer.invoke('notion:getProjectMarkdown') as Promise<string>,
   saveProjectMarkdown: (text: string) => ipcRenderer.invoke('notion:saveProjectMarkdown', text) as Promise<void>,
   getChatMarkdown: () => ipcRenderer.invoke('notion:getChatMarkdown') as Promise<string>,
-  saveChatMarkdown: (text: string) => ipcRenderer.invoke('notion:saveChatMarkdown', text) as Promise<void>
+  saveChatMarkdown: (text: string) => ipcRenderer.invoke('notion:saveChatMarkdown', text) as Promise<void>,
+  getTitleMarkdown: () => ipcRenderer.invoke('notion:getTitleMarkdown') as Promise<string>,
+  saveTitleMarkdown: (text: string) => ipcRenderer.invoke('notion:saveTitleMarkdown', text) as Promise<void>
 }
 
 if (process.contextIsolated) {

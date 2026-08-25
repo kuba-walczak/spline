@@ -733,6 +733,30 @@ export async function saveChatMarkdown(text: string): Promise<void> {
     await replaceCodeBlock(pageId, 'markdown', text)
 }
 
+function isTitleMarkdownPage(block: NotionBlock): boolean {
+    return block.type === 'child_page' && block.child_page?.title?.trim().toLowerCase() === 'title.md'
+}
+
+/** Reads the "TITLE.md" child page under the Config page — empty string if it doesn't exist yet. */
+export async function fetchTitleMarkdown(): Promise<string> {
+    const blocks = await fetchBlockChildren(CONFIG_PAGE_ID)
+    const page = blocks.find(isTitleMarkdownPage)
+    if (!page) return ''
+
+    const children = await fetchBlockChildren(page.id)
+    const codeBlock = children.find((b) => b.type === 'code')
+    return codeBlock ? plainText(codeBlock.code?.rich_text) : ''
+}
+
+/** Rewrites the "TITLE.md" child page under the Config page with `text`, creating the page first if needed. */
+export async function saveTitleMarkdown(text: string): Promise<void> {
+    const blocks = await fetchBlockChildren(CONFIG_PAGE_ID)
+    const existing = blocks.find(isTitleMarkdownPage)
+    const pageId = existing ? existing.id : await createChildPage(CONFIG_PAGE_ID, 'TITLE.md')
+
+    await replaceCodeBlock(pageId, 'markdown', text)
+}
+
 /** Appends a single paragraph block holding `text` to the project page. */
 export async function appendProjectNote(pageId: string, text: string): Promise<void> {
     if (!text.trim()) return

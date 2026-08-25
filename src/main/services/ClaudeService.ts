@@ -158,6 +158,55 @@ export function askClaude(prompt: string): Promise<string> {
     })
 }
 
+/** One-off, isolated headless call — its own process, no shared queue/session state, always haiku.
+    Used to summarize a chat's title; never touches the persistent conversation in `child`. */
+export function generateChatTitle(prompt: string): Promise<string> {
+    return new Promise((resolve, reject) => {
+        const args = [
+            '-p',
+            '--input-format', 'stream-json',
+            '--output-format', 'stream-json',
+            '--verbose',
+            '--model', 'haiku',
+            '--settings', noHooksSettingsPath
+        ].map(quoteArg).join(' ')
+
+        const proc = spawn(`claude ${args}`, { shell: true })
+        proc.stdout.setEncoding('utf8')
+        let buf = ''
+        let settled = false
+
+        proc.stdout.on('data', (chunk: string) => {
+            buf += chunk
+            let newlineIndex: number
+            while ((newlineIndex = buf.indexOf('\n')) >= 0) {
+                const line = buf.slice(0, newlineIndex)
+                buf = buf.slice(newlineIndex + 1)
+                if (!line.trim()) continue
+                const event = JSON.parse(line) as Record<string, unknown>
+                if (event.type === 'result') {
+                    settled = true
+                    const result = event as unknown as ResultEvent
+                    if (result.is_error) reject(new Error(result.result ?? 'Chat title generation failed'))
+                    else resolve(result.result ?? '')
+                    proc.stdin.end()
+                }
+            }
+        })
+
+        proc.on('error', reject)
+        proc.on('exit', () => {
+            if (!settled) reject(new Error('Chat title process exited early'))
+        })
+
+        const message = {
+            type: 'user',
+            message: { role: 'user', content: [{ type: 'text', text: prompt }] }
+        }
+        proc.stdin.write(JSON.stringify(message) + '\n')
+    })
+}
+
 export function stopClaude(): void {
     child?.stdin.end()
     child = null
