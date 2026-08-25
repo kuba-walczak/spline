@@ -19,6 +19,11 @@ interface DetailBlock {
   url?: string
 }
 
+interface ProjectChatEntry {
+  id: string
+  name: string
+}
+
 interface ProjectDetail {
   id: string
   title: string
@@ -26,6 +31,7 @@ interface ProjectDetail {
   instructions: string
   color: string | null
   blocks: DetailBlock[]
+  chats: ProjectChatEntry[]
 }
 
 /* Panel shell: 16px inset, hairline divider on every section but the last. */
@@ -50,14 +56,16 @@ const panelBodyStyle: CSSProperties = {
 /* Context — inner pages as small cards. */
 function fileTag(title: string): string {
   const match = /\.([a-z0-9]+)$/i.exec(title.trim())
-  return (match ? match[1] : 'doc').toUpperCase()
+  return (match ? match[1] : 'page').toUpperCase()
 }
 
 function ContextCard({
   title,
+  badge,
   onOpen
 }: {
   title: string
+  badge: string
   onOpen: () => void
 }): ReactElement {
   const [hover, setHover] = useState(false)
@@ -113,13 +121,20 @@ function ContextCard({
           letterSpacing: 'var(--tracking-tight)'
         }}
       >
-        {fileTag(title)}
+        {badge}
       </span>
     </div>
   )
 }
 
-function ContextCards({ pages, onOpen }: { pages: DetailBlock[]; onOpen: (id: string) => void }): ReactElement {
+interface ContextCardItem {
+  id: string
+  title: string
+  badge: string
+  onOpen: () => void
+}
+
+function ContextCards({ items }: { items: ContextCardItem[] }): ReactElement {
   return (
     <div
       style={{
@@ -129,8 +144,8 @@ function ContextCards({ pages, onOpen }: { pages: DetailBlock[]; onOpen: (id: st
         gap: 12
       }}
     >
-      {pages.map((p) => (
-        <ContextCard key={p.id} title={p.text || 'Untitled'} onOpen={() => onOpen(p.id)} />
+      {items.map((item) => (
+        <ContextCard key={item.id} title={item.title} badge={item.badge} onOpen={item.onOpen} />
       ))}
     </div>
   )
@@ -627,11 +642,17 @@ export interface ProjectDetailViewProps {
   projectId: string
   onBack: () => void
   onColorChange?: (projectId: string, color: string) => void
+  onOpenChat: (chatId: string) => void
 }
 
-const DEFAULT_COLOR = '#8a8a86'
+const DEFAULT_COLOR = '#151515'
 
-export default function ProjectDetailView({ projectId, onBack, onColorChange }: ProjectDetailViewProps): ReactElement {
+export default function ProjectDetailView({
+  projectId,
+  onBack,
+  onColorChange,
+  onOpenChat
+}: ProjectDetailViewProps): ReactElement {
   const [detail, setDetail] = useState<ProjectDetail | null>(null)
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState(false)
@@ -732,6 +753,22 @@ export default function ProjectDetailView({ projectId, onBack, onColorChange }: 
 
   const blocks = detail?.blocks ?? []
   const recents = blocks.filter((b) => b.type === 'child_page')
+  const chats = detail?.chats ?? []
+  const contextItems: ContextCardItem[] = recents
+    .map((p) => ({
+      id: p.id,
+      title: p.text || 'Untitled',
+      badge: fileTag(p.text || 'Untitled'),
+      onOpen: () => setOpenContextId(p.id)
+    }))
+    .concat(
+      chats.map((c) => ({
+        id: c.id,
+        title: c.name || 'Untitled',
+        badge: 'CHAT',
+        onOpen: () => onOpenChat(c.id)
+      }))
+    )
   const instructions = detail?.instructions ?? ''
   const color = colorDraft ?? detail?.color ?? DEFAULT_COLOR
   const colorDirty = colorDraft !== null && colorDraft !== detail?.color
@@ -977,10 +1014,10 @@ export default function ProjectDetailView({ projectId, onBack, onColorChange }: 
                 <span style={emptyStyle}>Loading…</span>
               ) : error ? (
                 <span style={emptyStyle}>Couldn&apos;t load this project.</span>
-              ) : recents.length === 0 ? (
+              ) : contextItems.length === 0 ? (
                 <ContextPlaceholder />
               ) : (
-                <ContextCards pages={recents} onOpen={setOpenContextId} />
+                <ContextCards items={contextItems} />
               )}
             </div>
           </aside>

@@ -14,6 +14,11 @@ const api = {
     setBrightness: (percentage: number) => ipcRenderer.invoke('streamDeck:setBrightness', percentage) as Promise<void>
   },
   askClaude: (prompt: string) => ipcRenderer.invoke('askClaude', prompt) as Promise<string>,
+  claudeConsumeNeedsGuidelines: () => ipcRenderer.invoke('claude:consumeNeedsGuidelines') as Promise<boolean>,
+  getClaudeModel: () => ipcRenderer.invoke('claude:getModel') as Promise<string>,
+  setClaudeModel: (model: string) => ipcRenderer.invoke('claude:setModel', model) as Promise<void>,
+  getClaudeEffort: () => ipcRenderer.invoke('claude:getEffort') as Promise<string>,
+  setClaudeEffort: (effort: string) => ipcRenderer.invoke('claude:setEffort', effort) as Promise<void>,
   onClaudeEvent: (callback: (event: Record<string, unknown>) => void) => {
     const listener = (_event: Electron.IpcRendererEvent, data: Record<string, unknown>): void => callback(data)
     ipcRenderer.on('claude:event', listener)
@@ -22,7 +27,7 @@ const api = {
   openChatWindow: () => ipcRenderer.invoke('chat:open') as Promise<void>,
   getChatLog: () =>
     ipcRenderer.invoke('notion:getChatLog') as Promise<
-      Array<{ id: string; name: string; lastActive: string | null }>
+      Array<{ id: string; name: string; lastActive: string | null; projects: string[] }>
     >,
   getChatTranscript: (pageId: string) =>
     ipcRenderer.invoke('notion:getChatTranscript', pageId) as Promise<
@@ -42,8 +47,8 @@ const api = {
   createChatPage: (name: string) => ipcRenderer.invoke('notion:createChatPage', name) as Promise<string>,
   updatePageTitle: (pageId: string, name: string) =>
     ipcRenderer.invoke('notion:updatePageTitle', pageId, name) as Promise<void>,
-  setChatProject: (pageId: string, projectTitle: string) =>
-    ipcRenderer.invoke('notion:setChatProject', pageId, projectTitle) as Promise<void>,
+  setChatProject: (pageId: string, projectTitles: string[]) =>
+    ipcRenderer.invoke('notion:setChatProject', pageId, projectTitles) as Promise<void>,
   archiveChatPage: (pageId: string) => ipcRenderer.invoke('notion:archiveChatPage', pageId) as Promise<void>,
   getProjects: () =>
     ipcRenderer.invoke('notion:getProjects') as Promise<
@@ -60,6 +65,7 @@ const api = {
       instructions: string
       color: string | null
       blocks: Array<{ id: string; type: string; text: string; checked?: boolean; url?: string }>
+      chats: Array<{ id: string; name: string }>
     }>,
   getProjectContext: (projectId: string) =>
     ipcRenderer.invoke('notion:getProjectContext', projectId) as Promise<string>,
@@ -74,7 +80,9 @@ const api = {
   createContextPage: (projectId: string, title: string, text: string) =>
     ipcRenderer.invoke('notion:createContextPage', projectId, title, text) as Promise<string>,
   getProjectMarkdown: () => ipcRenderer.invoke('notion:getProjectMarkdown') as Promise<string>,
-  saveProjectMarkdown: (text: string) => ipcRenderer.invoke('notion:saveProjectMarkdown', text) as Promise<void>
+  saveProjectMarkdown: (text: string) => ipcRenderer.invoke('notion:saveProjectMarkdown', text) as Promise<void>,
+  getChatMarkdown: () => ipcRenderer.invoke('notion:getChatMarkdown') as Promise<string>,
+  saveChatMarkdown: (text: string) => ipcRenderer.invoke('notion:saveChatMarkdown', text) as Promise<void>
 }
 
 if (process.contextIsolated) {

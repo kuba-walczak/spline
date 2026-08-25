@@ -22,15 +22,22 @@ declare global {
       setRgbColor: (r: number, g: number, b: number) => Promise<void>
       setLedStripColor: (r: number, g: number, b: number) => Promise<void>
       askClaude: (prompt: string) => Promise<string>
+      claudeConsumeNeedsGuidelines: () => Promise<boolean>
+      getClaudeModel: () => Promise<string>
+      setClaudeModel: (model: string) => Promise<void>
+      getClaudeEffort: () => Promise<string>
+      setClaudeEffort: (effort: string) => Promise<void>
       onClaudeEvent: (callback: (event: Record<string, unknown>) => void) => () => void
       openChatWindow: () => Promise<void>
-      getChatLog: () => Promise<Array<{ id: string; name: string; lastActive: string | null }>>
+      getChatLog: () => Promise<
+        Array<{ id: string; name: string; lastActive: string | null; projects: string[] }>
+      >
       getChatTranscript: (pageId: string) => Promise<ChatTranscriptMessage[]>
       updateLastActive: (pageId: string) => Promise<void>
       appendMessages: (pageId: string, messages: ChatMessage[]) => Promise<void>
       createChatPage: (name: string) => Promise<string>
       updatePageTitle: (pageId: string, name: string) => Promise<void>
-      setChatProject: (pageId: string, projectTitle: string) => Promise<void>
+      setChatProject: (pageId: string, projectTitles: string[]) => Promise<void>
       archiveChatPage: (pageId: string) => Promise<void>
       getProjects: () => Promise<
         Array<{ id: string; title: string; lastEdited: string | null; preview: string; color: string | null }>
@@ -44,6 +51,7 @@ declare global {
         instructions: string
         color: string | null
         blocks: Array<{ id: string; type: string; text: string; checked?: boolean; url?: string }>
+        chats: Array<{ id: string; name: string }>
       }>
       getProjectContext: (projectId: string) => Promise<string>
       appendProjectNote: (pageId: string, text: string) => Promise<void>
@@ -53,6 +61,8 @@ declare global {
       createContextPage: (projectId: string, title: string, text: string) => Promise<string>
       getProjectMarkdown: () => Promise<string>
       saveProjectMarkdown: (text: string) => Promise<void>
+      getChatMarkdown: () => Promise<string>
+      saveChatMarkdown: (text: string) => Promise<void>
     }
   }
 }

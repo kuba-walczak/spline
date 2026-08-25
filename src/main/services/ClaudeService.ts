@@ -14,12 +14,27 @@ interface ResultEvent {
     result?: string
 }
 
+interface SystemInitEvent {
+    type: 'system'
+    subtype: 'init'
+    session_id: string
+}
+
 /** Emits every parsed stream-json line (system/assistant/user/result), unfiltered. */
 export const claudeEvents = new EventEmitter()
 
 let child: ChildProcessWithoutNullStreams | null = null
 let buffer = ''
 const queue: Array<{ resolve: (value: string) => void; reject: (error: Error) => void }> = []
+/** True from the moment a headless CLI process spawns until the first prompt is sent to it —
+    the app's cue that this process has no memory of any prior conversation. */
+let needsGuidelines = true
+
+let currentModel = 'sonnet'
+let currentEffort = 'medium'
+/** Set from the `system init` event of the running process — passed to `--resume` when
+    respawning with a different model so the new process picks up the same conversation. */
+let sessionId: string | null = null
 
 function quoteArg(arg: string): string {
     return `"${arg.replace(/"/g, '""')}"`
@@ -30,6 +45,10 @@ function handleLine(line: string): void {
 
     const event = JSON.parse(line) as Record<string, unknown>
     claudeEvents.emit('event', event)
+
+    if (event.type === 'system' && (event as unknown as SystemInitEvent).subtype === 'init') {
+        sessionId = (event as unknown as SystemInitEvent).session_id
+    }
 
     if (event.type !== 'result') return
 
@@ -84,9 +103,10 @@ function ensureProcess(): ChildProcessWithoutNullStreams {
             'mcp__claude_ai_Notion__notion-update-view'
         ].join(' '),
         '--verbose',
-        '--model', 'sonnet',
-        '--effort', 'medium',
-        '--settings', noHooksSettingsPath
+        '--model', currentModel,
+        '--effort', currentEffort,
+        '--settings', noHooksSettingsPath,
+        ...(sessionId ? ['--resume', sessionId] : [])
     ].map(quoteArg).join(' ')
 
     const proc = spawn(`claude ${args}`, { shell: true })
@@ -105,12 +125,23 @@ function ensureProcess(): ChildProcessWithoutNullStreams {
     proc.on('exit', () => {
         child = null
         buffer = ''
+        needsGuidelines = true
         const pending = queue.splice(0)
         pending.forEach((p) => p.reject(new Error('Claude process exited')))
     })
 
     child = proc
+    needsGuidelines = true
     return proc
+}
+
+/** Spawns the process if needed and reports whether it hasn't been sent a prompt yet, consuming that fact
+    so subsequent calls report false until the process is replaced. */
+export function consumeNeedsGuidelines(): boolean {
+    ensureProcess()
+    const was = needsGuidelines
+    needsGuidelines = false
+    return was
 }
 
 export function askClaude(prompt: string): Promise<string> {
@@ -130,4 +161,27 @@ export function askClaude(prompt: string): Promise<string> {
 export function stopClaude(): void {
     child?.stdin.end()
     child = null
+}
+
+export function getClaudeModel(): string {
+    return currentModel
+}
+
+/** Switches the model for the next turn onward. Ends the running process (which flushes
+    its `session_id`) so the next `askClaude` call respawns with `--resume` on the new model. */
+export function setClaudeModel(model: string): void {
+    if (model === currentModel) return
+    currentModel = model
+    stopClaude()
+}
+
+export function getClaudeEffort(): string {
+    return currentEffort
+}
+
+/** Switches the effort level for the next turn onward, same respawn-on-resume mechanics as setClaudeModel. */
+export function setClaudeEffort(effort: string): void {
+    if (effort === currentEffort) return
+    currentEffort = effort
+    stopClaude()
 }

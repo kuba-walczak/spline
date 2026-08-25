@@ -9,6 +9,17 @@ export interface ComposerProject {
   title: string
 }
 
+export interface ComposerModel {
+  id: string
+  name: string
+  description: string
+}
+
+export interface ComposerEffort {
+  id: string
+  name: string
+}
+
 export interface ComposerProps {
   value: string
   onChange?: (value: string) => void
@@ -17,6 +28,14 @@ export interface ComposerProps {
   model?: string
   effort?: string
   onModelClick?: () => void
+  /** When provided (with modelId), the model/effort button opens the model menu instead of calling onModelClick. */
+  models?: ComposerModel[]
+  modelId?: string
+  onSelectModel?: (id: string) => void
+  efforts?: ComposerEffort[]
+  effortId?: string
+  defaultEffortId?: string
+  onSelectEffort?: (id: string) => void
   onAdd?: () => void
   /** When provided, the plus button opens a dropdown of these instead of calling onAdd. */
   projects?: ComposerProject[]
@@ -24,8 +43,8 @@ export interface ComposerProps {
   /** Projects currently linked to this composer (controlled by the parent). */
   attached?: ComposerProject[]
   onRemoveProject?: (id: string) => void
-  /** Once set, this chat is permanently bound to this project — attach UI is replaced with a locked badge. */
-  lockedProject?: ComposerProject
+  /** Projects already permanently bound to this chat — shown as locked badges, not offered again in the dropdown. */
+  lockedProjects?: ComposerProject[]
   onDictate?: () => void
   onVoice?: () => void
   className?: string
@@ -40,19 +59,31 @@ export function Composer({
   model,
   effort,
   onModelClick,
+  models,
+  modelId,
+  onSelectModel,
+  efforts,
+  effortId,
+  defaultEffortId,
+  onSelectEffort,
   onAdd,
   projects,
   onSelectProject,
   attached = [],
   onRemoveProject,
-  lockedProject,
+  lockedProjects = [],
   onDictate,
   onVoice,
   className,
   style
 }: ComposerProps): ReactElement {
   const [menuOpen, setMenuOpen] = useState(false)
+  const [modelMenuOpen, setModelMenuOpen] = useState(false)
+  const [effortMenuOpen, setEffortMenuOpen] = useState(false)
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
+
+  const selectedModel = models?.find((m) => m.id === modelId)
+  const selectedEffort = efforts?.find((e) => e.id === effortId)
 
   useEffect(() => {
     const el = textareaRef.current
@@ -122,7 +153,7 @@ export function Composer({
         <div style={{ position: 'relative', flex: '0 0 auto' }}>
           <IconButton
             icon="plus"
-            label={lockedProject ? 'Project locked' : 'Add'}
+            label={lockedProjects.length > 0 ? 'Project locked' : 'Add'}
             size="md"
             glyphSize={19}
             strokeWidth={2.5}
@@ -153,7 +184,7 @@ export function Composer({
                   zIndex: 41
                 }}
               >
-                {projects.filter((p) => !attached.some((a) => a.id === p.id) && p.id !== lockedProject?.id).length === 0 ? (
+                {projects.filter((p) => !attached.some((a) => a.id === p.id) && !lockedProjects.some((l) => l.id === p.id)).length === 0 ? (
                   <div
                     style={{
                       padding: '6px 10px',
@@ -166,7 +197,7 @@ export function Composer({
                   </div>
                 ) : (
                   projects
-                    .filter((p) => !attached.some((a) => a.id === p.id) && p.id !== lockedProject?.id)
+                    .filter((p) => !attached.some((a) => a.id === p.id) && !lockedProjects.some((l) => l.id === p.id))
                     .map((p) => (
                     <button
                       key={p.id}
@@ -206,9 +237,10 @@ export function Composer({
             </>
           ) : null}
         </div>
-        {lockedProject ? (
+        {lockedProjects.map((p) => (
           <span
-            title={`Locked to ${lockedProject.title}`}
+            key={p.id}
+            title={`Locked to ${p.title}`}
             style={{
               display: 'inline-flex',
               alignItems: 'center',
@@ -229,9 +261,9 @@ export function Composer({
             }}
           >
             <Icon name="lock" size={12} />
-            {lockedProject.title}
+            {p.title}
           </span>
-        ) : null}
+        ))}
         {attached.map((p) => (
           <button
             key={p.id}
@@ -265,7 +297,239 @@ export function Composer({
         ))}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-5)' }}>
-          {model ? <DropdownButton variant="bare" value={model} detail={effort} onClick={onModelClick} /> : null}
+          {models && modelId ? (
+            <div style={{ position: 'relative', flex: '0 0 auto' }}>
+              <DropdownButton
+                variant="bare"
+                value={selectedModel?.name ?? model ?? ''}
+                detail={selectedEffort?.name}
+                onClick={() => {
+                  setModelMenuOpen((v) => !v)
+                  setEffortMenuOpen(false)
+                }}
+              />
+              {modelMenuOpen ? (
+                <>
+                  <div
+                    onClick={() => {
+                      setModelMenuOpen(false)
+                      setEffortMenuOpen(false)
+                    }}
+                    style={{ position: 'fixed', inset: 0, zIndex: 40 }}
+                  />
+                  <div
+                    style={{
+                      position: 'absolute',
+                      bottom: 'calc(100% + 8px)',
+                      right: 0,
+                      width: 260,
+                      padding: 'var(--space-2)',
+                      boxSizing: 'border-box',
+                      background: '#20201F',
+                      border: '1px solid var(--border-default)',
+                      borderRadius: 'var(--radius-md)',
+                      boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+                      zIndex: 41
+                    }}
+                  >
+                  <div style={{ maxHeight: 320, overflowY: 'auto' }}>
+                    {models.map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() => {
+                          onSelectModel?.(m.id)
+                          setModelMenuOpen(false)
+                        }}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'flex-start',
+                          gap: 10,
+                          width: '100%',
+                          boxSizing: 'border-box',
+                          padding: 'var(--space-3)',
+                          background: 'transparent',
+                          border: 'none',
+                          borderRadius: 'var(--radius-sm)',
+                          cursor: 'pointer',
+                          textAlign: 'left'
+                        }}
+                        onMouseEnter={(ev) => (ev.currentTarget.style.background = 'var(--surface-hover)')}
+                        onMouseLeave={(ev) => (ev.currentTarget.style.background = 'transparent')}
+                      >
+                        <div style={{ flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 3 }}>
+                          <span
+                            style={{
+                              font: 'var(--weight-medium) var(--text-base)/1.2 var(--font-sans)',
+                              letterSpacing: 'var(--tracking-tight)',
+                              color: 'var(--text-primary)'
+                            }}
+                          >
+                            {m.name}
+                          </span>
+                          <span
+                            style={{
+                              font: 'var(--weight-regular) var(--text-sm)/1.35 var(--font-sans)',
+                              letterSpacing: 'var(--tracking-tight)',
+                              color: 'var(--text-muted)'
+                            }}
+                          >
+                            {m.description}
+                          </span>
+                        </div>
+                        {m.id === modelId ? (
+                          <span style={{ flex: '0 0 auto', display: 'flex', alignItems: 'center', height: 17, color: '#4a9eff' }}>
+                            <Icon name="check" size={17} />
+                          </span>
+                        ) : null}
+                      </button>
+                    ))}
+
+                    {efforts ? (
+                      <>
+                        <div style={{ height: 1, margin: 'var(--space-2) 8px', background: 'var(--border-default)' }} />
+                        <button
+                          type="button"
+                          onClick={() => setEffortMenuOpen((v) => !v)}
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 10,
+                            width: '100%',
+                            boxSizing: 'border-box',
+                            height: 40,
+                            padding: '0 10px 0 8px',
+                            background: effortMenuOpen ? 'var(--surface-hover)' : 'transparent',
+                            border: 'none',
+                            borderRadius: 'var(--radius-sm)',
+                            cursor: 'pointer',
+                            textAlign: 'left'
+                          }}
+                          onMouseEnter={(ev) => (ev.currentTarget.style.background = 'var(--surface-hover)')}
+                          onMouseLeave={(ev) => (ev.currentTarget.style.background = effortMenuOpen ? 'var(--surface-hover)' : 'transparent')}
+                        >
+                          <span
+                            style={{
+                              flex: '1 1 auto',
+                              font: 'var(--weight-medium) var(--text-base)/1 var(--font-sans)',
+                              letterSpacing: 'var(--tracking-tight)',
+                              color: 'var(--text-primary)'
+                            }}
+                          >
+                            Effort
+                          </span>
+                          <span
+                            style={{
+                              font: 'var(--weight-regular) var(--text-base)/1 var(--font-sans)',
+                              letterSpacing: 'var(--tracking-tight)',
+                              color: 'var(--text-muted)'
+                            }}
+                          >
+                            {selectedEffort?.name}
+                          </span>
+                          <span style={{ display: 'flex', alignItems: 'center', color: 'var(--text-faint)' }}>
+                            <Icon name="chevron-right" size={15} />
+                          </span>
+                        </button>
+                      </>
+                    ) : null}
+                  </div>
+
+                  {effortMenuOpen && efforts ? (
+                    <div
+                      style={{
+                        position: 'absolute',
+                        left: 'calc(100% + 12px)',
+                        bottom: 0,
+                        width: 300,
+                        padding: 'var(--space-2)',
+                        boxSizing: 'border-box',
+                        background: '#20201F',
+                        border: '1px solid var(--border-default)',
+                        borderRadius: 'var(--radius-md)',
+                        boxShadow: '0 8px 24px rgba(0,0,0,0.35)',
+                        zIndex: 41
+                      }}
+                    >
+                      <p
+                              style={{
+                                margin: 0,
+                                padding: '10px 10px 12px',
+                                font: 'var(--weight-regular) var(--text-sm)/1.45 var(--font-sans)',
+                                letterSpacing: 'var(--tracking-tight)',
+                                color: 'var(--text-muted)'
+                              }}
+                            >
+                              Higher effort means more thorough responses, but takes longer and uses your limits faster.
+                            </p>
+                            {efforts.map((e) => (
+                              <button
+                                key={e.id}
+                                type="button"
+                                onClick={() => {
+                                  onSelectEffort?.(e.id)
+                                  setEffortMenuOpen(false)
+                                  setModelMenuOpen(false)
+                                }}
+                                style={{
+                                  display: 'flex',
+                                  alignItems: 'center',
+                                  gap: 8,
+                                  width: '100%',
+                                  boxSizing: 'border-box',
+                                  height: 36,
+                                  padding: 'var(--space-2) 8px',
+                                  background: 'transparent',
+                                  border: 'none',
+                                  borderRadius: 'var(--radius-sm)',
+                                  cursor: 'pointer',
+                                  textAlign: 'left'
+                                }}
+                                onMouseEnter={(ev) => (ev.currentTarget.style.background = 'var(--surface-hover)')}
+                                onMouseLeave={(ev) => (ev.currentTarget.style.background = 'transparent')}
+                              >
+                                <span
+                                  style={{
+                                    font: 'var(--weight-medium) var(--text-base)/1 var(--font-sans)',
+                                    letterSpacing: 'var(--tracking-tight)',
+                                    color: 'var(--text-primary)'
+                                  }}
+                                >
+                                  {e.name}
+                                </span>
+                                {e.id === defaultEffortId ? (
+                                  <span
+                                    style={{
+                                      display: 'inline-flex',
+                                      alignItems: 'center',
+                                      height: 18,
+                                      padding: '0 6px',
+                                      background: 'var(--surface-control)',
+                                      borderRadius: 4,
+                                      font: 'var(--weight-medium) var(--text-xs)/1 var(--font-sans)',
+                                      color: 'var(--text-body)'
+                                    }}
+                                  >
+                                    Default
+                                  </span>
+                                ) : null}
+                                <span style={{ flex: '1 1 auto' }} />
+                                {e.id === effortId ? (
+                                  <span style={{ display: 'flex', alignItems: 'center', color: '#4a9eff' }}>
+                                    <Icon name="check" size={15} />
+                                  </span>
+                                ) : null}
+                              </button>
+                            ))}
+                      </div>
+                    ) : null}
+                  </div>
+                </>
+              ) : null}
+            </div>
+          ) : model ? (
+            <DropdownButton variant="bare" value={model} detail={effort} onClick={onModelClick} />
+          ) : null}
           <IconButton
             icon="mic"
             label="Dictate"

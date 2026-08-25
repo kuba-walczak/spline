@@ -28,6 +28,7 @@ export interface ChatLogEntry {
     id: string
     name: string
     lastActive: string | null
+    projects: string[]
 }
 
 interface NotionPage {
@@ -49,11 +50,20 @@ export async function fetchChatLog(): Promise<ChatLogEntry[]> {
     return data.results.map((page) => {
         const nameProp = page.properties.Name as { title?: NotionRichText[] } | undefined
         const lastActiveProp = page.properties['Last active'] as { date?: { start: string } } | undefined
+        const projectProp = page.properties.Project as
+            | { multi_select?: Array<{ name: string }>; select?: { name: string } | null }
+            | undefined
+        const projects = projectProp?.multi_select
+            ? projectProp.multi_select.map((o) => o.name)
+            : projectProp?.select
+                ? [projectProp.select.name]
+                : []
 
         return {
             id: page.id,
             name: plainText(nameProp?.title),
-            lastActive: lastActiveProp?.date?.start ?? null
+            lastActive: lastActiveProp?.date?.start ?? null,
+            projects
         }
     })
 }
@@ -163,13 +173,13 @@ export async function appendMessages(pageId: string, messages: ChatMessage[]): P
     if (!res.ok) throw new Error(`Notion append blocks failed: ${res.status} ${await res.text()}`)
 }
 
-/** Sets the Chat Log's "Project" select property — the option name must match an existing project title. */
-export async function setChatProject(pageId: string, projectTitle: string): Promise<void> {
+/** Sets the Chat Log's "Project" multi-select property — each name must match an existing project title. */
+export async function setChatProjects(pageId: string, projectTitles: string[]): Promise<void> {
     const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
         method: 'PATCH',
         headers: headers(),
         body: JSON.stringify({
-            properties: { Project: { select: { name: projectTitle } } }
+            properties: { Project: { multi_select: projectTitles.map((name) => ({ name })) } }
         })
     })
 
@@ -441,6 +451,11 @@ function toDetailBlock(block: NotionBlock): ProjectDetailBlock | null {
     }
 }
 
+export interface ProjectChatEntry {
+    id: string
+    name: string
+}
+
 export interface ProjectDetail {
     id: string
     title: string
@@ -448,6 +463,7 @@ export interface ProjectDetail {
     instructions: string
     color: string | null
     blocks: ProjectDetailBlock[]
+    chats: ProjectChatEntry[]
 }
 
 function isInstructionsPage(block: NotionBlock): boolean {
@@ -583,18 +599,33 @@ export async function fetchProjectDetail(pageId: string): Promise<ProjectDetail>
     const blocks = await fetchBlockChildren(pageId)
     const { instructions, color } = await fetchClaudeMd(blocks)
     const contentBlocks = blocks.filter((b) => !isInstructionsPage(b))
+    const title = plainText(titleProp?.title)
+
+    const chatLog = await fetchChatLog()
+    const chats = chatLog.filter((c) => c.projects.includes(title)).map((c) => ({ id: c.id, name: c.name }))
 
     return {
         id: pageId,
-        title: plainText(titleProp?.title),
+        title,
         lastEdited: page.last_edited_time ?? null,
         instructions,
         color,
-        blocks: contentBlocks.map(toDetailBlock).filter((b): b is ProjectDetailBlock => b !== null)
+        blocks: contentBlocks.map(toDetailBlock).filter((b): b is ProjectDetailBlock => b !== null),
+        chats
     }
 }
 
-/** Concatenates a project's instructions and every context page's text into one injectable block. */
+/** Flattens a chat transcript to plain text, alternating "User:"/"Assistant:" lines. */
+function transcriptToText(messages: ChatTranscriptMessage[]): string {
+    return messages
+        .filter((m) => m.content.trim().length > 0)
+        .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content.trim()}`)
+        .join('\n')
+}
+
+/** Concatenates a project's instructions, every context page's text, and every attached chat's transcript
+    into one injectable block. Chats show up in the project's Context section same as pages (see
+    ProjectDetailView's `contextItems`), so they belong here too — not just the child-page blocks. */
 export async function fetchProjectContext(projectId: string): Promise<string> {
     const detail = await fetchProjectDetail(projectId)
     const contextPages = detail.blocks.filter((b) => b.type === 'child_page')
@@ -611,10 +642,20 @@ export async function fetchProjectContext(projectId: string): Promise<string> {
         })
     )
 
+    const chatTexts = await Promise.all(
+        detail.chats.map(async (chat) => ({
+            title: chat.name || 'Untitled',
+            text: transcriptToText(await fetchChatTranscript(chat.id))
+        }))
+    )
+
     const parts: string[] = []
     if (detail.instructions.trim()) parts.push(`guidelines:\n${detail.instructions.trim()}`)
     for (const p of pageTexts) {
         if (p.text.trim()) parts.push(`title: ${p.title}\ncontent: ${p.text.trim()}`)
+    }
+    for (const c of chatTexts) {
+        if (c.text.trim()) parts.push(`chat: ${c.title}\ncontent: ${c.text.trim()}`)
     }
 
     return parts.join('\n\n')
@@ -664,6 +705,30 @@ export async function saveProjectMarkdown(text: string): Promise<void> {
     const blocks = await fetchBlockChildren(CONFIG_PAGE_ID)
     const existing = blocks.find(isProjectMarkdownPage)
     const pageId = existing ? existing.id : await createChildPage(CONFIG_PAGE_ID, 'PROJECT.md')
+
+    await replaceCodeBlock(pageId, 'markdown', text)
+}
+
+function isChatMarkdownPage(block: NotionBlock): boolean {
+    return block.type === 'child_page' && block.child_page?.title?.trim().toLowerCase() === 'chat.md'
+}
+
+/** Reads the "CHAT.md" child page under the Config page — empty string if it doesn't exist yet. */
+export async function fetchChatMarkdown(): Promise<string> {
+    const blocks = await fetchBlockChildren(CONFIG_PAGE_ID)
+    const page = blocks.find(isChatMarkdownPage)
+    if (!page) return ''
+
+    const children = await fetchBlockChildren(page.id)
+    const codeBlock = children.find((b) => b.type === 'code')
+    return codeBlock ? plainText(codeBlock.code?.rich_text) : ''
+}
+
+/** Rewrites the "CHAT.md" child page under the Config page with `text`, creating the page first if needed. */
+export async function saveChatMarkdown(text: string): Promise<void> {
+    const blocks = await fetchBlockChildren(CONFIG_PAGE_ID)
+    const existing = blocks.find(isChatMarkdownPage)
+    const pageId = existing ? existing.id : await createChildPage(CONFIG_PAGE_ID, 'CHAT.md')
 
     await replaceCodeBlock(pageId, 'markdown', text)
 }

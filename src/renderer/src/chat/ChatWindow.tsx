@@ -13,8 +13,12 @@ import { Icon } from '@/components/ui/icon'
 type MessagePart =
   | { kind: 'text'; text: string }
   | { kind: 'tool'; name: string; query: string }
-  | { kind: 'context'; label: string; text: string }
-  | { kind: 'injection'; text: string }
+  /** `persist: false` marks a project re-injected while priming a resumed chat — shown in the UI as a
+      bubble (the context really is being sent to Claude this turn) but not recorded to the Notion
+      transcript's `projects` list, since it's already on record from when the project was first attached. */
+  | { kind: 'context'; label: string; text: string; persist?: boolean }
+  | { kind: 'injection'; label: string; text: string }
+  | { kind: 'transcript'; label: string; text: string }
 
 interface Message {
   id: number
@@ -35,7 +39,9 @@ interface StoredMessage {
 }
 
 function partsToStored(parts: MessagePart[]): StoredMessage {
-  const contextParts = parts.filter((p): p is { kind: 'context'; label: string; text: string } => p.kind === 'context')
+  const contextParts = parts.filter(
+    (p): p is { kind: 'context'; label: string; text: string; persist?: boolean } => p.kind === 'context'
+  )
   return {
     content: parts
       .filter((p): p is { kind: 'text'; text: string } => p.kind === 'text')
@@ -44,7 +50,7 @@ function partsToStored(parts: MessagePart[]): StoredMessage {
     tools: parts
       .filter((p): p is { kind: 'tool'; name: string; query: string } => p.kind === 'tool')
       .map((p) => ({ name: p.name, query: p.query })),
-    projects: contextParts.map((p) => p.label)
+    projects: contextParts.filter((p) => p.persist !== false).map((p) => p.label)
   }
 }
 
@@ -54,16 +60,24 @@ function storedToParts(message: StoredMessage): MessagePart[] {
   return projects.concat(tools).concat(textPart(message.content))
 }
 
+/** Flattens a resumed conversation's prior turns to plain text — what gets pasted back to a fresh CLI process
+    that lost the conversation when the app restarted. */
+function messagesToTranscriptText(messages: Message[]): string {
+  return messages
+    .map((m) => ({ role: m.role === 'user' ? 'User' : 'Assistant', content: partsToStored(m.parts).content.trim() }))
+    .filter((m) => m.content.length > 0)
+    .map((m) => `${m.role}: ${m.content}`)
+    .join('\n\n')
+}
+
 interface Conversation {
   id: number
   title: string
   messages: Message[]
   sourceId?: string
   loaded?: boolean
-  /** Set the moment a project's context is first injected — the chat is locked to that project from then on. */
-  lockedProjectId?: string
-  lockedProjectTitle?: string
-  /** Titles of every project ever injected into this conversation — drives the sidebar tint. */
+  /** Titles of every project ever injected into this conversation — drives the sidebar tint and locks
+      that project's attach option so it can't be added again. */
   referencedProjectTitles?: string[]
 }
 
@@ -85,6 +99,21 @@ const REPLIES = [
 
 const CARET = '▍'
 const UNTITLED = 'New chat'
+
+const MODELS = [
+  { id: 'opus', name: 'Opus 5', description: 'Most capable model for complex challenges' },
+  { id: 'sonnet', name: 'Sonnet 5', description: 'Most efficient for everyday tasks' },
+  { id: 'haiku', name: 'Haiku 4.5', description: 'Fastest for daily tasks' }
+]
+
+const EFFORTS = [
+  { id: 'low', name: 'Low' },
+  { id: 'medium', name: 'Medium' },
+  { id: 'high', name: 'High' },
+  { id: 'extra', name: 'Extra' },
+  { id: 'max', name: 'Max' }
+]
+const DEFAULT_EFFORT_ID = 'medium'
 
 interface ContentBlock {
   type: string
@@ -153,8 +182,12 @@ export default function ChatWindow({
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [draft, setDraft] = useState('')
   const [streamingId, setStreamingId] = useState<number | null>(null)
+  const [modelId, setModelId] = useState('sonnet')
+  const [effortId, setEffortId] = useState(DEFAULT_EFFORT_ID)
 
   const scrollRef = useRef<HTMLDivElement | null>(null)
+  const lastMessageRef = useRef<HTMLDivElement | null>(null)
+  const spacerRef = useRef<HTMLDivElement | null>(null)
   const [fadeEdges, setFadeEdges] = useState({ top: false, bottom: false })
 
   function updateFadeEdges(): void {
@@ -186,6 +219,8 @@ export default function ChatWindow({
   const conversationsRef = useRef<Conversation[]>([])
   const notionChatsRef = useRef<Conversation[]>([])
   const pendingPageId = useRef(new Map<number, Promise<string>>())
+  /** Notion chat sourceIds whose transcript has already been pasted back to the CLI process this app session. */
+  const primedSourceIds = useRef(new Set<string>())
 
   function refreshChatLog(): void {
     window.api
@@ -208,7 +243,8 @@ export default function ChatWindow({
                 title: entry.name,
                 messages: existing?.messages ?? [],
                 loaded: existing?.loaded,
-                sourceId: entry.id
+                sourceId: entry.id,
+                referencedProjectTitles: unionTitles(existing?.referencedProjectTitles, entry.projects)
               }
             })
         })
@@ -230,7 +266,19 @@ export default function ChatWindow({
   useEffect(() => {
     refreshChatLog()
     refreshProjects()
+    window.api.getClaudeModel().then(setModelId).catch((error) => console.error('[claude] getClaudeModel failed:', error))
+    window.api.getClaudeEffort().then(setEffortId).catch((error) => console.error('[claude] getClaudeEffort failed:', error))
   }, [])
+
+  function selectModel(id: string): void {
+    setModelId(id)
+    window.api.setClaudeModel(id).catch((error) => console.error('[claude] setClaudeModel failed:', error))
+  }
+
+  function selectEffort(id: string): void {
+    setEffortId(id)
+    window.api.setClaudeEffort(id).catch((error) => console.error('[claude] setClaudeEffort failed:', error))
+  }
 
   useEffect(() => {
     conversationsRef.current = conversations
@@ -247,14 +295,32 @@ export default function ChatWindow({
     const byTitle = new Map(projects.map((p) => [p.title, p.color]))
     return Array.from(new Set(titles.map((t) => byTitle.get(t)).filter((c): c is string => Boolean(c))))
   }
+
+  /** Projects already referenced by a chat — offered as locked, non-removable badges so they can't be re-attached. */
+  function lockedProjectsFor(titles: string[] | undefined): Project[] {
+    if (!titles || titles.length === 0) return []
+    const byTitle = new Map(projects.map((p) => [p.title, p]))
+    return titles.map((t) => byTitle.get(t)).filter((p): p is Project => Boolean(p))
+  }
   const active = allConversations.find((c) => c.id === activeId) ?? null
   const messages = active ? active.messages : []
 
+  /** Keeps the newest message vertically centered instead of pinned to the bottom edge, near the
+      composer — a spacer after the last message pads the scroll area so centering it (via scrollTop)
+      still lands on the true bottom once the message grows past the spacer. */
   useLayoutEffect(() => {
     const el = scrollRef.current
-    if (el) el.scrollTop = el.scrollHeight
+    const lastEl = lastMessageRef.current
+    const spacerEl = spacerRef.current
+    if (!el) return
+    if (spacerEl) {
+      const lastHeight = lastEl?.offsetHeight ?? 0
+      const spacer = Math.max(0, Math.round((el.clientHeight - lastHeight) / 2))
+      spacerEl.style.height = `${spacer}px`
+    }
+    el.scrollTop = el.scrollHeight
     updateFadeEdges()
-  }, [messages, activeId])
+  }, [messages, activeId, streamingId])
 
   useEffect(() => () => clearTimer(), [])
 
@@ -367,6 +433,12 @@ export default function ChatWindow({
     setRoute('project')
   }
 
+  /** Navigates to a chat's transcript given its Notion page id — the id shape a project's context box lists chats by. */
+  function openChatBySourceId(sourceId: string): void {
+    const chat = allConversations.find((c) => c.sourceId === sourceId)
+    if (chat) selectConversation(chat.id)
+  }
+
   function newProject(): void {
     if (creatingProject) return
     setCreatingProject(true)
@@ -437,37 +509,81 @@ export default function ChatWindow({
     const text = draft.trim()
     if (!text || streamingId !== null) return
 
-    const wasLocked = Boolean(active?.lockedProjectId)
     const conversationId = activeId ?? createConversation()
+    const conv = allConversations.find((c) => c.id === conversationId) ?? null
     const projectsToInject = attachedProjects
-    const lockProject = !wasLocked && projectsToInject.length > 0 ? projectsToInject[0] : null
+    const projectTitlesForNotion = unionTitles(conv?.referencedProjectTitles, projectsToInject.map((p) => p.title))
+
+    /* A conversation reloaded from Notion (app restart, or switching back to it) has messages the headless
+       CLI process has never seen — it's a fresh process with no memory of this chat. Prime it once per app
+       session by pasting the transcript back in, alongside every referenced project's instructions. */
+    const priorMessages = conv?.messages ?? []
+    const needsPriming = Boolean(conv?.sourceId) && priorMessages.length > 0 && !primedSourceIds.current.has(conv!.sourceId!)
+    const transcriptText = needsPriming ? messagesToTranscriptText(priorMessages) : ''
+    const resumeProjects = needsPriming
+      ? (conv?.referencedProjectTitles ?? [])
+          .map((title) => projects.find((p) => p.title === title))
+          .filter((p): p is Project => Boolean(p))
+          .filter((p) => !projectsToInject.some((ap) => ap.id === p.id))
+      : []
+    const allProjectsToInject = projectsToInject.concat(resumeProjects)
 
     let userParts: MessagePart[] = textPart(text)
     let sendText = text
 
-    if (projectsToInject.length > 0) {
-      try {
-        const [injectionPrompt, contexts] = await Promise.all([
-          window.api.getProjectMarkdown(),
-          Promise.all(projectsToInject.map(async (p) => ({ title: p.title, text: await window.api.getProjectContext(p.id) })))
-        ])
-        const nonEmpty = contexts.filter((c) => c.text.trim().length > 0)
-        if (nonEmpty.length > 0 || injectionPrompt.trim()) {
-          const injectionPart: MessagePart[] = injectionPrompt.trim()
-            ? [{ kind: 'injection', text: injectionPrompt.trim() }]
-            : []
-          const contextParts: MessagePart[] = nonEmpty.map((c) => ({
-            kind: 'context',
-            label: c.title,
-            text: `${c.title}\n\n${c.text.trim()}`
-          }))
-          const blocks = [injectionPrompt.trim(), ...nonEmpty.map((c) => `${c.title}\n\n${c.text.trim()}`)].filter(Boolean)
-          sendText = blocks.length > 0 ? blocks.join('\n\n') + '\n\n' + text : text
-          userParts = injectionPart.concat(contextParts).concat(textPart(text))
-        }
-      } catch (error) {
-        console.error('[chat] getProjectContext failed:', error)
+    /* Project guidelines whenever a project is attached (directly or via resume) — every such send, since
+       attaching a project is itself a deliberate per-message action. Chat guidelines only when a fresh
+       headless CLI process is also resuming a conversation it has no memory of — the transcript-priming
+       moment — not on a brand-new chat's first prompt, which has no prior context to accompany. Order,
+       matching the badges: Project guidelines, project(s), Chat guidelines, Chat title. */
+    const hasProjects = allProjectsToInject.length > 0
+    const freshProcess = await window.api.claudeConsumeNeedsGuidelines()
+    const wantsChatGuidelines = freshProcess && needsPriming
+
+    try {
+      const [projectGuidelines, chatGuidelines, contexts] = await Promise.all([
+        hasProjects ? window.api.getProjectMarkdown() : Promise.resolve(''),
+        wantsChatGuidelines ? window.api.getChatMarkdown() : Promise.resolve(''),
+        Promise.all(allProjectsToInject.map(async (p) => ({ title: p.title, text: await window.api.getProjectContext(p.id) })))
+      ])
+      const nonEmpty = contexts.filter((c) => c.text.trim().length > 0)
+      if (nonEmpty.length > 0 || projectGuidelines.trim() || chatGuidelines.trim() || transcriptText) {
+        const projectGuidelinesPart: MessagePart[] = projectGuidelines.trim()
+          ? [{ kind: 'injection', label: 'Project guidelines', text: projectGuidelines.trim() }]
+          : []
+        /* A project already recorded on this conversation (attached earlier, or re-injected only because
+           the headless process needed priming again) still gets a bubble here — the context really is being
+           sent to Claude this turn — but isn't re-recorded to the Notion transcript's `projects` list, since
+           it's already on record from when it was first attached. Claude gets the full context either way,
+           via `blocks` below. */
+        const alreadyReferenced = new Set(conv?.referencedProjectTitles ?? [])
+        const contextParts: MessagePart[] = nonEmpty.map((c) => ({
+          kind: 'context',
+          label: c.title,
+          text: `${c.title}\n\n${c.text.trim()}`,
+          persist: !alreadyReferenced.has(c.title)
+        }))
+        const chatGuidelinesPart: MessagePart[] = chatGuidelines.trim()
+          ? [{ kind: 'injection', label: 'Chat guidelines', text: chatGuidelines.trim() }]
+          : []
+        const transcriptPart: MessagePart[] = transcriptText
+          ? [{ kind: 'transcript', label: conv?.title || UNTITLED, text: transcriptText }]
+          : []
+        const blocks = [
+          projectGuidelines.trim(),
+          ...nonEmpty.map((c) => `${c.title}\n\n${c.text.trim()}`),
+          chatGuidelines.trim(),
+          transcriptText ? `Conversation so far:\n\n${transcriptText}` : ''
+        ].filter(Boolean)
+        sendText = blocks.length > 0 ? blocks.join('\n\n') + '\n\n' + text : text
+        userParts = projectGuidelinesPart
+          .concat(contextParts)
+          .concat(chatGuidelinesPart)
+          .concat(transcriptPart)
+          .concat(textPart(text))
       }
+    } catch (error) {
+      console.error('[chat] getProjectContext failed:', error)
     }
 
     const userMsg: Message = { id: nextMessageId.current++, role: 'user', parts: userParts }
@@ -480,8 +596,7 @@ export default function ChatWindow({
         ...c,
         title,
         messages: c.messages.concat([userMsg, { id: botId, role: 'assistant', parts: [] }]),
-        referencedProjectTitles: unionTitles(c.referencedProjectTitles, projectsToInject.map((p) => p.title)),
-        ...(lockProject ? { lockedProjectId: lockProject.id, lockedProjectTitle: lockProject.title } : {})
+        referencedProjectTitles: unionTitles(c.referencedProjectTitles, projectsToInject.map((p) => p.title))
       }
     })
     setDraft('')
@@ -502,12 +617,15 @@ export default function ChatWindow({
       }
 
       const sourceId = await ensureSourceId(conversationId)
+      /* The live process now has this turn in its memory (whether this send primed it or it was already
+         mid-conversation) — no future send in this session needs to re-inject the transcript for it. */
+      if (sourceId) primedSourceIds.current.add(sourceId)
       if (sourceId && finalText !== null) {
         try {
           const assistantParts = streamParts.current.length > 0 ? streamParts.current : textPart(finalText)
           await window.api.appendMessages(sourceId, [partsToStored(userParts), partsToStored(assistantParts)])
           if (title) await window.api.updatePageTitle(sourceId, title)
-          if (lockProject) await window.api.setChatProject(sourceId, lockProject.title)
+          if (projectTitlesForNotion.length > 0) await window.api.setChatProject(sourceId, projectTitlesForNotion)
           await window.api.updateLastActive(sourceId)
           refreshChatLog()
         } catch (error) {
@@ -568,16 +686,24 @@ export default function ChatWindow({
     overflow: 'hidden'
   }
 
-/** Renders each project-context part as its own badge, for use in a standalone bubble. */
+/** Renders each project-context part (plus the resumed transcript and the global settings prompt, if
+    injected) as its own badge, for use in a standalone bubble. */
   function renderContextBadges(parts: MessagePart[]): ReactElement[] {
     return parts
-      .filter((p): p is { kind: 'context'; label: string; text: string } => p.kind === 'context')
-      .map((part, i) => (
-        <span key={i} title={part.text} style={{ ...toolBadgeStyle, margin: 0 }}>
-          <Icon name="folder" size={12} />
-          <strong style={{ fontWeight: 'var(--weight-medium)' }}>{part.label}</strong>
-        </span>
-      ))
+      .filter(
+        (p): p is { kind: 'injection' | 'context' | 'transcript'; label: string; text: string } =>
+          p.kind === 'injection' || p.kind === 'context' || p.kind === 'transcript'
+      )
+      .map((part, i) => {
+        const icon = part.kind === 'injection' ? 'sliders-horizontal' : part.kind === 'transcript' ? 'message-circle' : 'folder'
+        const alignSelf = part.kind === 'injection' && part.label === 'Project guidelines' ? undefined : 'flex-end'
+        return (
+          <span key={i} title={part.text} style={{ ...toolBadgeStyle, margin: 0, alignSelf }}>
+            <Icon name={icon} size={12} />
+            <strong style={{ fontWeight: 'var(--weight-medium)' }}>{part.label}</strong>
+          </span>
+        )
+      })
   }
 
   /** Renders a message's parts. The global injection prompt carries no per-project identity, so it stays silent.
@@ -588,15 +714,17 @@ export default function ChatWindow({
     while (i < parts.length) {
       const part = parts[i]
 
-      if (part.kind === 'injection' || part.kind === 'context') {
+      if (part.kind === 'injection' || part.kind === 'context' || part.kind === 'transcript') {
         i++
         continue
       }
 
       if (part.kind === 'tool') {
+        const toolIcon = part.name === 'WebSearch' ? 'search' : part.name === 'ToolSearch' ? 'wrench' : null
         rendered.push(
           <span key={i}>
             <span title={part.query} style={toolBadgeStyle}>
+              {toolIcon ? <Icon name={toolIcon} size={12} /> : null}
               <strong style={{ fontWeight: 'var(--weight-medium)' }}>{part.name}</strong>
               <span style={{ color: 'var(--text-muted)' }}>
                 {part.query.length > 40 ? `${part.query.slice(0, 40)}…` : part.query}
@@ -700,6 +828,7 @@ export default function ChatWindow({
           <ProjectDetailView
             projectId={activeProjectId}
             onBack={() => setRoute('projects')}
+            onOpenChat={openChatBySourceId}
             onColorChange={(id, color) =>
               setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, color } : p)))
             }
@@ -747,11 +876,12 @@ export default function ChatWindow({
                 gap: '26px'
               }}
             >
-              {messages.map((m) => {
+              {messages.map((m, i) => {
                 const contextBadges = renderContextBadges(m.parts)
                 return (
                   <div
                     key={m.id}
+                    ref={i === messages.length - 1 ? lastMessageRef : undefined}
                     style={{
                       display: 'flex',
                       flexDirection: 'column',
@@ -767,7 +897,7 @@ export default function ChatWindow({
                           justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start'
                         }}
                       >
-                        <div style={{ ...botBubbleStyle, display: 'flex', flexWrap: 'wrap', gap: '6px' }}>
+                        <div style={{ ...botBubbleStyle, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '9px' }}>
                           {contextBadges}
                         </div>
                       </div>
@@ -787,6 +917,7 @@ export default function ChatWindow({
                   </div>
                 )
               })}
+              <div ref={spacerRef} style={{ flex: '0 0 auto' }} />
             </div>
           ) : (
             <div
@@ -811,17 +942,18 @@ export default function ChatWindow({
             onChange={setDraft}
             onKeyDown={onKeyDown}
             placeholder=""
-            model="Opus 5"
-            effort="High"
+            models={MODELS}
+            modelId={modelId}
+            onSelectModel={selectModel}
+            efforts={EFFORTS}
+            effortId={effortId}
+            defaultEffortId={DEFAULT_EFFORT_ID}
+            onSelectEffort={selectEffort}
             projects={projects}
             attached={attachedProjects}
             onSelectProject={attachProject}
             onRemoveProject={removeAttachedProject}
-            lockedProject={
-              active?.lockedProjectId
-                ? { id: active.lockedProjectId, title: active.lockedProjectTitle ?? '' }
-                : undefined
-            }
+            lockedProjects={lockedProjectsFor(active?.referencedProjectTitles)}
             style={{ maxWidth: 'var(--container)', minHeight: '104px' }}
           />
         </div>

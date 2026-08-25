@@ -6,7 +6,9 @@ import {
   Blocks,
   Briefcase,
   ChartNoAxesColumn,
+  Check,
   ChevronDown,
+  ChevronRight,
   Clipboard,
   Clock,
   CodeXml,
@@ -15,6 +17,7 @@ import {
   EllipsisVertical,
   Folder,
   House,
+  Info,
   Lock,
   MessageCircle,
   Menu,
@@ -27,6 +30,7 @@ import {
   RefreshCw,
   Search,
   SlidersHorizontal,
+  Wrench,
   X
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
@@ -60,7 +64,9 @@ const ICONS: Record<string, LucideIcon> = {
   blocks: Blocks,
   briefcase: Briefcase,
   'chart-no-axes-column': ChartNoAxesColumn,
+  check: Check,
   'chevron-down': ChevronDown,
+  'chevron-right': ChevronRight,
   clipboard: Clipboard,
   clock: Clock,
   'code-xml': CodeXml,
@@ -69,6 +75,7 @@ const ICONS: Record<string, LucideIcon> = {
   'ellipsis-vertical': EllipsisVertical,
   folder: Folder,
   house: House,
+  info: Info,
   lock: Lock,
   'message-circle': MessageCircle,
   menu: Menu,
@@ -82,6 +89,7 @@ const ICONS: Record<string, LucideIcon> = {
   'refresh-cw': RefreshCw,
   search: Search,
   'sliders-horizontal': SlidersHorizontal,
+  wrench: Wrench,
   x: X
 }
 

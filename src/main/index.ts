@@ -2,7 +2,16 @@ import { app, BrowserWindow, ipcMain, IpcMainEvent, Menu } from 'electron'
 import { join } from 'path'
 import { is } from '@electron-toolkit/utils'
 import { disconnectAllDevices, getStreamDeck, setAllDevicesSolidColor, setLedStripSolidColor } from './services/DeviceManager'
-import { askClaude, claudeEvents, stopClaude } from './services/ClaudeService'
+import {
+  askClaude,
+  claudeEvents,
+  consumeNeedsGuidelines,
+  getClaudeEffort,
+  getClaudeModel,
+  setClaudeEffort,
+  setClaudeModel,
+  stopClaude
+} from './services/ClaudeService'
 import {
   appendMessages,
   appendProjectNote,
@@ -11,13 +20,15 @@ import {
   createContextPage,
   createProjectPage,
   fetchChatLog,
+  fetchChatMarkdown,
   fetchChatTranscript,
   fetchProjectContext,
   fetchProjectDetail,
   fetchProjectMarkdown,
   fetchProjects,
+  saveChatMarkdown,
   saveProjectMarkdown,
-  setChatProject,
+  setChatProjects,
   updateContextPageContent,
   updateLastActive,
   updatePageTitle,
@@ -175,6 +186,26 @@ ipcMain.handle('askClaude', async (_event, prompt: string) => {
   return askClaude(prompt)
 })
 
+ipcMain.handle('claude:consumeNeedsGuidelines', () => {
+  return consumeNeedsGuidelines()
+})
+
+ipcMain.handle('claude:getModel', () => {
+  return getClaudeModel()
+})
+
+ipcMain.handle('claude:setModel', (_event, model: string) => {
+  setClaudeModel(model)
+})
+
+ipcMain.handle('claude:getEffort', () => {
+  return getClaudeEffort()
+})
+
+ipcMain.handle('claude:setEffort', (_event, effort: string) => {
+  setClaudeEffort(effort)
+})
+
 ipcMain.handle('chat:open', () => {
   createChatWindow()
 })
@@ -213,8 +244,8 @@ ipcMain.handle('notion:updatePageTitle', async (_event, pageId: string, name: st
   await updatePageTitle(pageId, name)
 })
 
-ipcMain.handle('notion:setChatProject', async (_event, pageId: string, projectTitle: string) => {
-  await setChatProject(pageId, projectTitle)
+ipcMain.handle('notion:setChatProject', async (_event, pageId: string, projectTitles: string[]) => {
+  await setChatProjects(pageId, projectTitles)
 })
 
 ipcMain.handle('notion:archiveChatPage', async (_event, pageId: string) => {
@@ -272,4 +303,12 @@ ipcMain.handle('notion:getProjectMarkdown', async () => {
 
 ipcMain.handle('notion:saveProjectMarkdown', async (_event, text: string) => {
   await saveProjectMarkdown(text)
+})
+
+ipcMain.handle('notion:getChatMarkdown', async () => {
+  return fetchChatMarkdown()
+})
+
+ipcMain.handle('notion:saveChatMarkdown', async (_event, text: string) => {
+  await saveChatMarkdown(text)
 })
