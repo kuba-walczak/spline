@@ -1,5 +1,5 @@
 import { useEffect, useLayoutEffect, useRef, useState } from 'react'
-import type { CSSProperties, KeyboardEvent, ReactElement } from 'react'
+import type { CSSProperties, KeyboardEvent, MouseEvent as ReactMouseEvent, ReactElement } from 'react'
 import { Composer } from '@/components/ui/composer'
 import { Sidebar } from './Sidebar'
 import { TitleBar } from './TitleBar'
@@ -91,12 +91,6 @@ interface Project {
   color: string | null
 }
 
-const REPLIES = [
-  "Good question. The short answer is that the retrieval step runs before the model call, not during it — so the app has already decided what you'll get before a single token is generated.\n\nIn practice that means the quality of an answer is often set by the retriever, not the model.",
-  "Roughly, yes. The app keeps a running budget for the window and spends it in priority order: system prompt first, then pinned or project context, then recent turns, then whatever similarity search returns.\n\nAnything that doesn't fit gets summarised or dropped.",
-  "It depends on where the truncation happens. Dropping the oldest turns is cheap and predictable; summarising them keeps more meaning but introduces a lossy step you can't audit later.\n\nMost production systems do both, at different thresholds."
-]
-
 const CARET = '▍'
 const UNTITLED = 'New chat'
 
@@ -179,6 +173,7 @@ export default function ChatWindow({
   const [creatingProject, setCreatingProject] = useState(false)
   const [attachedProjects, setAttachedProjects] = useState<Project[]>([])
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
+  const [sidebarWidth, setSidebarWidth] = useState(308)
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [draft, setDraft] = useState('')
   const [streamingId, setStreamingId] = useState<number | null>(null)
@@ -189,6 +184,34 @@ export default function ChatWindow({
   const lastMessageRef = useRef<HTMLDivElement | null>(null)
   const spacerRef = useRef<HTMLDivElement | null>(null)
   const [fadeEdges, setFadeEdges] = useState({ top: false, bottom: false })
+
+  const SIDEBAR_MIN = 200
+  const SIDEBAR_MAX = 480
+  const SIDEBAR_SNAP_CLOSE = 220
+
+  function startSidebarResize(e: ReactMouseEvent): void {
+    e.preventDefault()
+    const startX = e.clientX
+    const startWidth = sidebarWidth
+
+    function onMove(ev: MouseEvent): void {
+      const next = startWidth + (ev.clientX - startX)
+      if (next < SIDEBAR_SNAP_CLOSE) {
+        setSidebarCollapsed(true)
+        return
+      }
+      setSidebarCollapsed(false)
+      setSidebarWidth(Math.min(SIDEBAR_MAX, Math.max(SIDEBAR_MIN, next)))
+    }
+
+    function onUp(): void {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+    }
+
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
 
   function updateFadeEdges(): void {
     const el = scrollRef.current
@@ -796,7 +819,9 @@ export default function ChatWindow({
           <div
             id="chatsidebar"
             style={{
+              position: 'relative',
               flex: '0 0 auto',
+              width: sidebarWidth,
               height: '100%',
               minHeight: 0,
               overflow: 'hidden',
@@ -819,6 +844,18 @@ export default function ChatWindow({
               onNewProject={newProject}
               route={route}
               onNavigate={setRoute}
+            />
+            <div
+              onMouseDown={startSidebarResize}
+              style={{
+                position: 'absolute',
+                top: 0,
+                right: 0,
+                width: 6,
+                height: '100%',
+                cursor: 'col-resize',
+                background: 'transparent'
+              }}
             />
           </div>
         ) : null}

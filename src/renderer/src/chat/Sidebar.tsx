@@ -167,7 +167,7 @@ export function Sidebar({
   return (
     <aside
       style={{
-        width: 'var(--sidebar-width)',
+        width: '100%',
         flex: '0 0 auto',
         display: 'flex',
         flexDirection: 'column',
