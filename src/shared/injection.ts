@@ -14,6 +14,16 @@
     draw the pieces apart. A bare blank line cannot serve: chat transcripts contain those already. */
 export const CONTEXT_SEPARATOR = '\n\n---\n\n'
 
+/** Seeded into SYSTEM.md the first time it is read, then owned by whoever edits that page.
+
+    Exists because the web-search tool appends "You MUST include the sources above in your response"
+    to every result it returns. The app already lists those sources beside the reply, so without a
+    counter-instruction every answer ends in a duplicate list of links. */
+export const DEFAULT_SYSTEM_PROMPT =
+    'Web search results are displayed to the user as a list of sources next to your reply, so they ' +
+    'can already see every page you consulted. Do not end your response with a "Sources" section or ' +
+    'a list of links. Cite a specific page inline only when the claim needs attribution.'
+
 /** One attached project's contribution to the system prompt. */
 export interface ProjectContext {
     /** The project's title, which is all that names it to the model. */

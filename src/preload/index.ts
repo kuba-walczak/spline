@@ -36,6 +36,7 @@ const api = {
           kind: 'text' | 'tool'
           text: string
           label?: string
+          outcome?: { links: Array<{ title: string; url: string }>; tools: string[]; text: string }
         }>
       }>
     >,
@@ -106,6 +107,8 @@ const api = {
     ipcRenderer.invoke('notion:updateContextPageContent', pageId, text) as Promise<void>,
   createContextPage: (projectId: string, title: string, text: string) =>
     ipcRenderer.invoke('notion:createContextPage', projectId, title, text) as Promise<string>,
+  getSystemMarkdown: () => ipcRenderer.invoke('notion:getSystemMarkdown') as Promise<string>,
+  saveSystemMarkdown: (text: string) => ipcRenderer.invoke('notion:saveSystemMarkdown', text) as Promise<void>,
   getTitleMarkdown: () => ipcRenderer.invoke('notion:getTitleMarkdown') as Promise<string>,
   saveTitleMarkdown: (text: string) => ipcRenderer.invoke('notion:saveTitleMarkdown', text) as Promise<void>
 }

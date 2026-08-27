@@ -13,6 +13,13 @@ export interface NavItemProps {
   emphasis?: boolean
   badge?: ReactNode
   trailing?: ReactNode
+  /** Overrides the hover and selected background. Chat rows sit on their own surface, distinct
+      from the nav items above them. */
+  highlight?: string
+  /** Forces the hover appearance from outside. Controls that sit over the row — the chats' options
+      button — are siblings rather than children, so pointing at one takes the cursor off this
+      button and the row would otherwise go flat while its own menu is being used. */
+  hovered?: boolean
   onClick?: () => void
   className?: string
   style?: CSSProperties
@@ -26,12 +33,18 @@ export function NavItem({
   emphasis,
   badge,
   trailing,
+  highlight,
+  hovered = false,
   onClick,
   className,
   style
 }: NavItemProps): ReactElement {
   const [hover, setHover] = useState(false)
-  const background = active ? 'var(--surface-selected)' : hover ? 'var(--surface-hover)' : 'transparent'
+  const background = active
+    ? highlight ?? 'var(--surface-selected)'
+    : hover || hovered
+      ? highlight ?? 'var(--surface-hover)'
+      : 'transparent'
 
   const glyph = emphasis ? (
     <span

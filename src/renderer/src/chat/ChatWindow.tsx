@@ -5,9 +5,12 @@ import { Sidebar } from './Sidebar'
 import { TitleBar } from './TitleBar'
 import { SettingsModal } from './SettingsModal'
 import { ProjectContextModal } from './ProjectContextModal'
+import { clampPollSeconds, loadPollSeconds, savePollSeconds } from '@/lib/pollInterval'
+import { loadExpandTools, saveExpandTools } from '@/lib/expandTools'
 import ProjectDetailView from './ProjectDetailView'
 import { Icon } from '@/components/ui/icon'
 import { buildSystemPrompt } from '@shared/injection'
+import { outcomeFromToolResult, type ToolOutcome } from '@shared/toolResults'
 import type { SessionStatus } from './Sidebar'
 
 /* Implementation of `Chat Window.dc.html` from the Claude app design system.
@@ -19,7 +22,9 @@ import type { SessionStatus } from './Sidebar'
 
 type MessagePart =
   | { kind: 'text'; text: string }
-  | { kind: 'tool'; name: string; query: string }
+  /** `id` correlates the call with the `tool_result` that answers it, which is where a search's
+      sources arrive — one turn later, and on a separate branch of the transcript. */
+  | { kind: 'tool'; name: string; query: string; id?: string; outcome?: ToolOutcome }
 
 interface Message {
   id: number
@@ -36,6 +41,7 @@ interface TranscriptPart {
   kind: 'text' | 'tool'
   text: string
   label?: string
+  outcome?: ToolOutcome
 }
 
 function textOf(parts: MessagePart[]): string {
@@ -49,7 +55,9 @@ function textOf(parts: MessagePart[]): string {
     never appears here — it lives in the system prompt, and is shown from the composer chip. */
 function transcriptToParts(parts: TranscriptPart[]): MessagePart[] {
   return parts.map((p) => {
-    if (p.kind === 'tool') return { kind: 'tool' as const, name: p.label || 'tool', query: p.text }
+    if (p.kind === 'tool') {
+      return { kind: 'tool' as const, name: p.label || 'tool', query: p.text, outcome: p.outcome }
+    }
     return { kind: 'text' as const, text: p.text }
   })
 }
@@ -76,6 +84,9 @@ interface Conversation {
   /** The projects' version stamps at the moment `systemPrompt` was assembled, keyed by project id.
       Compared against fresh stamps on each send to notice a project edited since. */
   contextVersions?: Record<string, string>
+  /** When this chat was last spoken to, as the sidebar's "5 minutes ago" label. Read from Notion at
+      startup and moved forward locally on each send. */
+  lastActive?: string | null
 }
 
 interface Project {
@@ -84,7 +95,6 @@ interface Project {
   color: string | null
 }
 
-const CARET = '▍'
 const UNTITLED = 'New chat'
 
 const MODELS = [
@@ -107,6 +117,9 @@ interface ContentBlock {
   type: string
   name?: string
   input?: unknown
+  id?: string
+  tool_use_id?: string
+  content?: unknown
 }
 
 /** Reduces a tool's input object down to just its values — no field names or braces. */
@@ -118,13 +131,392 @@ function queryOf(input: unknown): string {
     .join(' ')
 }
 
-/** Only surfaces tool calls and the final answer — drops system/init/partial/tool-result noise. */
+/** Shown while a turn is in flight. The dots cycle 0-3 in a fixed-width slot, so the word does not
+    shuffle sideways as they come and go.
+
+    Module scope on purpose: nested inside ChatWindow this would be a new component type on every
+    render, restarting its interval each time a tool event arrives. */
+function Thinking(): ReactElement {
+  const [dots, setDots] = useState(0)
+
+  useEffect(() => {
+    const handle = window.setInterval(() => setDots((d) => (d + 1) % 4), 420)
+    return () => window.clearInterval(handle)
+  }, [])
+
+  return (
+    <span style={{ color: 'var(--text-muted)' }}>
+      Thinking
+      <span style={{ display: 'inline-block', width: '1.4em', textAlign: 'left' }}>{'.'.repeat(dots)}</span>
+    </span>
+  )
+}
+
+/** A tool call as the bubbles render it. */
+type ToolPart = Extract<MessagePart, { kind: 'tool' }>
+
+/* What each tool is drawn with. The names are the CLI's own; anything unlisted falls back to the
+   wrench, which is the generic "a tool ran" glyph rather than a stand-in for a missing case. */
+const TOOL_ICONS: Record<string, string> = {
+  WebSearch: 'globe',
+  WebFetch: 'globe',
+  ToolSearch: 'wrench',
+  Bash: 'terminal',
+  PowerShell: 'terminal',
+  Glob: 'search',
+  Grep: 'search',
+  Read: 'file-text',
+  Write: 'pencil',
+  Edit: 'pencil',
+  NotebookEdit: 'pencil'
+}
+
+function iconForTool(name: string): string {
+  return TOOL_ICONS[name] ?? 'wrench'
+}
+
+/** One colour for every tool glyph, wherever it appears — the row that announces a call and the
+    rows a tool lookup resolves to. Deliberately not a text token: these read as marks beside the
+    text rather than as text of their own. */
+const TOOL_ICON_COLOR = '#6B6965'
+
+/* `ToolHeader` pads 4px and puts a 10px gap after the icon, so indenting the output panel by
+   `4 + size + 10` lines its left edge up with the query above it rather than with the icon. Derived
+   from the icon size so the two cannot drift apart. */
+const TOOL_ICON_SIZE = 18
+const HEADER_PAD_X = 4
+const HEADER_GAP = 10
+const ROW_GAP = 12
+/* Groups sit close together; the reply that follows them is a different kind of thing and gets room
+   to separate from the run of tool calls above it. */
+const GROUP_GAP = 6
+const REPLY_GAP = 20
+const OUTPUT_INDENT = HEADER_PAD_X + TOOL_ICON_SIZE + HEADER_GAP
+
+
+/** Bare host, so a row reads "Demographics of Poland — en.wikipedia.org" rather than a full URL. */
+function hostOf(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '')
+  } catch {
+    return ''
+  }
+}
+
+/** The row a tool call is announced with: its icon, what it was asked, and what came back. Shared
+    so a tool lookup and a web search read as the same kind of thing. `onToggle` is what makes it a
+    control — a call with nothing to expand into simply omits it, chevron and all. */
+function ToolHeader({
+  icon,
+  query,
+  trailing,
+  open,
+  onToggle
+}: {
+  icon: string
+  query: string
+  trailing?: string
+  open?: boolean
+  onToggle?: () => void
+}): ReactElement {
+  return (
+    <span
+      onClick={onToggle}
+      title={onToggle ? (open ? 'Hide results' : 'Show results') : undefined}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '10px',
+        padding: '0 4px 8px',
+        cursor: onToggle ? 'pointer' : 'default',
+        font: 'var(--weight-regular) var(--text-base)/1.3 var(--font-sans)',
+        letterSpacing: 'var(--tracking-tight)'
+      }}
+    >
+      <span style={{ display: 'inline-flex', flex: '0 0 auto', color: TOOL_ICON_COLOR }}>
+        <Icon name={icon} size={TOOL_ICON_SIZE} />
+      </span>
+      <span
+        title={query}
+        style={{
+          flex: '1 1 auto',
+          minWidth: 0,
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          color: 'var(--text-body)'
+        }}
+      >
+        {query}
+      </span>
+      {trailing ? <span style={{ flex: '0 0 auto', color: 'var(--text-faint)' }}>{trailing}</span> : null}
+      {onToggle ? (
+        <span style={{ display: 'inline-flex', flex: '0 0 auto', color: 'var(--text-faint)' }}>
+          <Icon
+            name="chevron-down"
+            size={13}
+            style={{ transform: open ? 'none' : 'rotate(-90deg)', transition: 'var(--transition-control)' }}
+          />
+        </span>
+      ) : null}
+    </span>
+  )
+}
+
+/** A site's own icon, falling back to a globe for hosts that serve none. Sourced from Google's
+    favicon endpoint, which means the hosts a search returned are visible to Google — the tradeoff
+    for having icons at all, since fetching `/favicon.ico` per host misses as often as it hits. */
+function Favicon({ url }: { url: string }): ReactElement {
+  const [failed, setFailed] = useState(false)
+  const host = hostOf(url)
+
+  if (failed || !host) {
+    return (
+      <span style={{ display: 'inline-flex', width: 16, justifyContent: 'center', color: 'var(--text-faint)' }}>
+        <Icon name="globe" size={14} />
+      </span>
+    )
+  }
+
+  return (
+    <img
+      src={`https://www.google.com/s2/favicons?sz=64&domain=${encodeURIComponent(host)}`}
+      alt=""
+      width={16}
+      height={16}
+      loading="lazy"
+      onError={() => setFailed(true)}
+      style={{ display: 'block', flex: '0 0 auto', borderRadius: '3px' }}
+    />
+  )
+}
+
+/** One web search: the query it ran, and the sources it came back with. The list is capped and
+    scrolls rather than growing, so a turn with several searches stays readable. */
+/** A run of calls to one tool: named once, with a chevron revealing what each call asked and what
+    came back. Every tool renders this way — a search reveals its sources, a tool lookup reveals the
+    tool it resolved, everything else reveals just its query.
+
+    Module scope on purpose: nested inside ChatWindow this would be a new component type on every
+    render, snapping shut each time a streamed token arrives. */
+function ToolGroup({
+  name,
+  parts,
+  defaultOpen,
+  gapAfter = GROUP_GAP
+}: {
+  name: string
+  parts: ToolPart[]
+  defaultOpen: boolean
+  /** Wider when the assistant's reply comes next rather than another tool. */
+  gapAfter?: number
+}): ReactElement {
+  const [open, setOpen] = useState(defaultOpen)
+  const [hover, setHover] = useState(false)
+
+  /* Follows the preference when it changes, so flipping the switch in settings takes effect on
+     what is already on screen rather than only on the next chat opened. A group toggled by hand
+     afterwards keeps that state until the preference moves again. */
+  useEffect(() => setOpen(defaultOpen), [defaultOpen])
+
+  return (
+    <span style={{ display: 'block', margin: `2px 0 ${gapAfter}px` }}>
+      <span
+        onClick={() => setOpen((v) => !v)}
+        onMouseEnter={() => setHover(true)}
+        onMouseLeave={() => setHover(false)}
+        title={open ? 'Hide details' : 'Show details'}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: '6px',
+          marginBottom: '5px',
+          cursor: 'pointer',
+          font: 'var(--weight-medium) var(--text-base)/1.3 var(--font-sans)',
+          letterSpacing: 'var(--tracking-tight)',
+          /* Quiet until pointed at — the name labels the group, it is not the point of the row. */
+          color: hover ? 'var(--text-primary)' : '#A5A9A9',
+          transition: 'var(--transition-control)'
+        }}
+      >
+        {name}
+        <Icon
+          name="chevron-down"
+          size={14}
+          style={{ transform: open ? 'none' : 'rotate(-90deg)', transition: 'var(--transition-control)' }}
+        />
+      </span>
+
+      {open
+        ? parts.map((part, index) => (
+            <span key={index} style={{ display: 'block', marginBottom: `${ROW_GAP}px` }}>
+              <ToolHeader
+                icon={iconForTool(part.name)}
+                query={part.query}
+                trailing={
+                  part.outcome && part.outcome.links.length > 0
+                    ? `${part.outcome.links.length} result${part.outcome.links.length === 1 ? '' : 's'}`
+                    : undefined
+                }
+              />
+              <ToolOutput outcome={part.outcome} />
+            </span>
+          ))
+        : null}
+    </span>
+  )
+}
+
+/** The panel under a call. One shape for every tool, whatever it returned — a search's sources, the
+    tools a lookup resolved, or the raw text anything else came back with. A call still awaiting its
+    result gets the panel too, so the layout does not jump when the answer lands. */
+function ToolOutput({ outcome }: { outcome?: ToolOutcome }): ReactElement {
+  const links = outcome?.links ?? []
+  const tools = outcome?.tools ?? []
+  const text = outcome?.text ?? ''
+
+  return (
+    <span
+      className="chatscroll"
+      style={{
+        display: 'block',
+        marginLeft: `${OUTPUT_INDENT}px`,
+        maxHeight: '148px',
+        overflowY: 'auto',
+        padding: '6px',
+        background: '#1A1A19',
+        border: '1px solid var(--border-default)',
+        borderRadius: 'var(--radius-lg)'
+      }}
+    >
+      {links.map((link) => (
+        <a
+          key={link.url}
+          href={link.url}
+          target="_blank"
+          rel="noreferrer"
+          title={link.url}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '11px',
+            height: '33px',
+            padding: '0 8px',
+            borderRadius: 'var(--radius-sm)',
+            textDecoration: 'none',
+            transition: 'var(--transition-control)'
+          }}
+          onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--surface-hover)')}
+          onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+        >
+          <Favicon url={link.url} />
+          <span
+            style={{
+              flex: '1 1 auto',
+              minWidth: 0,
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              whiteSpace: 'nowrap',
+              font: 'var(--weight-regular) var(--text-base)/1 var(--font-sans)',
+              letterSpacing: 'var(--tracking-tight)',
+              color: 'var(--text-body)'
+            }}
+          >
+            {link.title}
+          </span>
+          <span
+            style={{
+              flex: '0 0 auto',
+              font: 'var(--type-meta)',
+              letterSpacing: 'var(--tracking-tight)',
+              color: 'var(--text-faint)'
+            }}
+          >
+            {hostOf(link.url)}
+          </span>
+        </a>
+      ))}
+
+      {tools.map((tool) => (
+        <span
+          key={tool}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: '11px',
+            height: '33px',
+            padding: '0 8px',
+            font: 'var(--weight-regular) var(--text-base)/1 var(--font-sans)',
+            letterSpacing: 'var(--tracking-tight)',
+            color: 'var(--text-body)'
+          }}
+        >
+          <span style={{ display: 'inline-flex', flex: '0 0 auto', color: TOOL_ICON_COLOR }}>
+            <Icon name={iconForTool(tool)} size={TOOL_ICON_SIZE - 2} />
+          </span>
+          {tool}
+        </span>
+      ))}
+
+      {text ? (
+        <span
+          style={{
+            display: 'block',
+            padding: '4px 8px',
+            font: 'var(--weight-regular) var(--text-base)/1.5 var(--font-mono)',
+            whiteSpace: 'pre-wrap',
+            overflowWrap: 'anywhere',
+            color: 'var(--text-body)'
+          }}
+        >
+          {text}
+        </span>
+      ) : null}
+
+      {links.length === 0 && tools.length === 0 && !text ? (
+        <span
+          style={{
+            display: 'block',
+            padding: '8px',
+            font: 'var(--type-meta)',
+            letterSpacing: 'var(--tracking-tight)',
+            color: 'var(--text-faint)'
+          }}
+        >
+          No output.
+        </span>
+      ) : null}
+    </span>
+  )
+}
+
+/** Tool results ride on `user` events, keyed by the `tool_use_id` they answer. */
+function resultsFromEvent(event: Record<string, unknown>): Map<string, ToolOutcome> {
+  const found = new Map<string, ToolOutcome>()
+  if (event.type !== 'user') return found
+
+  const content = (event.message as { content?: ContentBlock[] } | undefined)?.content ?? []
+  for (const block of content) {
+    if (block.type !== 'tool_result' || !block.tool_use_id) continue
+    const outcome = outcomeFromToolResult(block.content)
+    if (outcome.links.length > 0 || outcome.tools.length > 0 || outcome.text) {
+      found.set(block.tool_use_id, outcome)
+    }
+  }
+  return found
+}
+
 function formatEvent(event: Record<string, unknown>): MessagePart[] {
   if (event.type === 'assistant') {
     const content = (event.message as { content?: ContentBlock[] } | undefined)?.content ?? []
     return content
       .filter((block) => block.type === 'tool_use')
-      .map((block) => ({ kind: 'tool' as const, name: block.name ?? 'tool', query: queryOf(block.input) }))
+      .map((block) => ({
+        kind: 'tool' as const,
+        name: block.name ?? 'tool',
+        query: queryOf(block.input),
+        id: block.id
+      }))
   }
 
   if (event.type === 'result') {
@@ -172,6 +564,15 @@ export default function ChatWindow({
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(308)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  const [pollSeconds, setPollSeconds] = useState(loadPollSeconds)
+  const [expandTools, setExpandTools] = useState(loadExpandTools)
+  /* SYSTEM.md — prepended to every chat's system prompt. Held in a ref as well as state because
+     `assembleSystemPrompt` reads it from inside async work that may have started before an edit
+     landed, and the stale closure value would silently reinstate the old instruction. */
+  const systemMarkdown = useRef('')
+  /* Bumped on a timer purely to force a re-render: the sidebar's age labels are derived from
+     `Date.now()` at render time, so nothing else has to change for them to advance. */
+  const [, setTick] = useState(0)
   /** Project whose injected context is open in the modal, by id. */
   const [contextProjectId, setContextProjectId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
@@ -277,6 +678,7 @@ export default function ChatWindow({
                 /* Replaces rather than merges: the row is the authoritative set, and a project
                    detached from the chat has to stay detached. */
                 referencedProjectTitles: entry.projects,
+                lastActive: entry.lastActive,
                 systemPrompt: existing?.systemPrompt,
                 contextVersions: existing?.contextVersions
               }
@@ -356,10 +758,41 @@ export default function ChatWindow({
     return titles.map((t) => byTitle.get(t)).filter((p): p is Project => Boolean(p))
   }
 
-  function colorsFor(titles: string[] | undefined): string[] {
-    if (!titles || titles.length === 0) return []
-    const byTitle = new Map(projects.map((p) => [p.title, p.color]))
-    return Array.from(new Set(titles.map((t) => byTitle.get(t)).filter((c): c is string => Boolean(c))))
+  useEffect(() => {
+    const handle = window.setInterval(() => setTick((t) => t + 1), pollSeconds * 1000)
+    return () => window.clearInterval(handle)
+  }, [pollSeconds])
+
+  useEffect(() => {
+    void loadSystemMarkdown()
+  }, [])
+
+  async function loadSystemMarkdown(): Promise<void> {
+    try {
+      systemMarkdown.current = (await window.api.getSystemMarkdown()).trim()
+    } catch (error) {
+      console.error('[chat] getSystemMarkdown failed:', error)
+    }
+  }
+
+  /* An edited instruction has to reach chats already open, so every cached prompt is dropped and
+     rebuilt on the next send rather than being patched in place. */
+  async function refreshSystemMarkdown(): Promise<void> {
+    await loadSystemMarkdown()
+    const clear = (c: Conversation): Conversation => ({ ...c, systemPrompt: undefined, contextVersions: undefined })
+    setConversations((prev) => prev.map(clear))
+    setNotionChats((prev) => prev.map(clear))
+  }
+
+  function changeExpandTools(value: boolean): void {
+    setExpandTools(value)
+    saveExpandTools(value)
+  }
+
+  function changePollSeconds(value: number): void {
+    const next = clampPollSeconds(value)
+    setPollSeconds(next)
+    savePollSeconds(next)
   }
 
   const active = allConversations.find((c) => c.id === activeId) ?? null
@@ -403,6 +836,11 @@ export default function ChatWindow({
     return window.api.onClaudeEvent(({ sessionId, event }) => {
       const target = streamTarget.current
       if (!target || target.sessionId !== sessionId) return
+      /* Results answer a call that is already on screen, so they update an existing badge rather
+         than appending a new part. */
+      const results = resultsFromEvent(event)
+      if (results.size > 0) attachToolResults(target, results)
+
       const parts = formatEvent(event)
       if (parts.length > 0) appendParts(target, parts)
     })
@@ -419,6 +857,24 @@ export default function ChatWindow({
       }
     }
     return merged
+  }
+
+  /** Folds a turn's tool results onto the badges they belong to, matched by `tool_use_id`. */
+  function attachToolResults(
+    target: { conversationId: number; botId: number; sessionId: string },
+    results: Map<string, ToolOutcome>
+  ): void {
+    const withResults = (parts: MessagePart[]): MessagePart[] =>
+      parts.map((p) => {
+        const outcome = p.kind === 'tool' && p.id ? results.get(p.id) : undefined
+        return outcome ? { ...p, outcome } : p
+      })
+
+    streamParts.current = withResults(streamParts.current)
+    patch(target.conversationId, (c) => ({
+      ...c,
+      messages: c.messages.map((m) => (m.id === target.botId ? { ...m, parts: withResults(m.parts) } : m))
+    }))
   }
 
   function appendParts(
@@ -471,7 +927,16 @@ export default function ChatWindow({
     const sessionId = crypto.randomUUID()
     sessionIdByConversation.current.set(id, sessionId)
     setConversations((prev) =>
-      prev.concat({ id, title: UNTITLED, messages: [], sessionId, model: modelId, effort: effortId, loaded: true })
+      prev.concat({
+        id,
+        title: UNTITLED,
+        messages: [],
+        sessionId,
+        model: modelId,
+        effort: effortId,
+        loaded: true,
+        lastActive: new Date().toISOString()
+      })
     )
     setActiveId(id)
     setDraft('')
@@ -562,16 +1027,19 @@ export default function ChatWindow({
       stamp newer than what was actually fetched, and the next send reassembles. Reading them first
       would record the edit as already included and never pick it up. */
   async function assembleSystemPrompt(attached: Project[]): Promise<AssembledContext> {
-    if (attached.length === 0) return { systemPrompt: '', versions: {} }
+    const base = systemMarkdown.current
+    if (attached.length === 0) return { systemPrompt: base, versions: {} }
     try {
       const contexts = await Promise.all(
         attached.map(async (p) => ({ title: p.title, text: (await window.api.getProjectContext(p.id)).trim() }))
       )
       const versions = await readVersions(attached)
-      return { systemPrompt: buildSystemPrompt(contexts.map((c) => ({ label: c.title, text: c.text }))), versions }
+      const projectContext = buildSystemPrompt(contexts.map((c) => ({ label: c.title, text: c.text })))
+      return { systemPrompt: [base, projectContext].filter((t) => t.trim()).join('\n\n'), versions }
     } catch (error) {
       console.error('[chat] project context assembly failed:', error)
-      return { systemPrompt: '', versions: {} }
+      /* The base instruction still applies even when the project fetch failed. */
+      return { systemPrompt: base, versions: {} }
     }
   }
 
@@ -722,7 +1190,10 @@ export default function ChatWindow({
       messages: c.messages.concat([userMsg, { id: botId, role: 'assistant', parts: [] }]),
       referencedProjectTitles: projectTitlesForNotion,
       systemPrompt,
-      contextVersions
+      contextVersions,
+      /* Mirrors the `updateLastActive` write below, so the label moves the moment the message is
+         sent rather than waiting for the next read of the chat log. */
+      lastActive: new Date().toISOString()
     }))
     setDraft('')
     setStreamingId(conversationId)
@@ -813,22 +1284,6 @@ export default function ChatWindow({
     letterSpacing: 'var(--tracking-tight)',
     whiteSpace: 'pre-wrap'
   }
-  const toolBadgeStyle: CSSProperties = {
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: '6px',
-    verticalAlign: 'middle',
-    margin: '2px 4px 8px 0',
-    padding: '2px 8px',
-    background: 'var(--surface-subtle)',
-    borderRadius: 'var(--radius-sm)',
-    fontSize: 'var(--text-xs)',
-    fontFamily: 'var(--font-sans)',
-    letterSpacing: 'var(--tracking-tight)',
-    whiteSpace: 'nowrap',
-    maxWidth: '100%',
-    overflow: 'hidden'
-  }
 
   /** Renders a message's parts. */
   function renderParts(parts: MessagePart[]): ReactElement[] {
@@ -837,23 +1292,31 @@ export default function ChatWindow({
     while (i < parts.length) {
       const part = parts[i]
 
+      /* Consecutive calls to the same tool are one run, named once rather than repeating the
+         header per call. A different tool starts a new group. */
       if (part.kind === 'tool') {
-        const toolIcon = part.name === 'WebSearch' ? 'search' : part.name === 'ToolSearch' ? 'wrench' : null
+        const group: ToolPart[] = []
+        const start = i
+        while (i < parts.length) {
+          const next = parts[i]
+          if (next.kind !== 'tool' || next.name !== part.name) break
+          group.push(next)
+          i++
+        }
+        const replyNext = i < parts.length && parts[i].kind === 'text'
         rendered.push(
-          <span key={i}>
-            <span title={part.query} style={toolBadgeStyle}>
-              {toolIcon ? <Icon name={toolIcon} size={12} /> : null}
-              <strong style={{ fontWeight: 'var(--weight-medium)' }}>{part.name}</strong>
-              <span style={{ color: 'var(--text-muted)' }}>
-                {part.query.length > 40 ? `${part.query.slice(0, 40)}…` : part.query}
-              </span>
-            </span>
-            <br />
-          </span>
+          <ToolGroup
+            key={start}
+            name={part.name}
+            parts={group}
+            defaultOpen={expandTools}
+            gapAfter={replyNext ? REPLY_GAP : GROUP_GAP}
+          />
         )
-      } else {
-        rendered.push(<span key={i}>{part.text}</span>)
+        continue
       }
+
+      rendered.push(<span key={i}>{part.text}</span>)
       i++
     }
     return rendered
@@ -879,7 +1342,16 @@ export default function ChatWindow({
         onToggleSidebar={() => setSidebarCollapsed((v) => !v)}
         onOpenSettings={() => setSettingsOpen(true)}
       />
-      {settingsOpen ? <SettingsModal onClose={() => setSettingsOpen(false)} /> : null}
+      {settingsOpen ? (
+        <SettingsModal
+          onClose={() => setSettingsOpen(false)}
+          onSystemPromptSaved={() => void refreshSystemMarkdown()}
+          expandTools={expandTools}
+          onExpandToolsChange={changeExpandTools}
+          pollSeconds={pollSeconds}
+          onPollSecondsChange={changePollSeconds}
+        />
+      ) : null}
       {contextProject ? (
         <ProjectContextModal
           projectId={contextProject.id}
@@ -906,8 +1378,9 @@ export default function ChatWindow({
               conversations={allConversations.map((c) => ({
                 id: c.id,
                 title: c.title,
-                colors: colorsFor(c.referencedProjectTitles),
-                status: sessionStatuses[c.sessionId] ?? 'idle'
+                projects: projectsForTitles(c.referencedProjectTitles ?? []),
+                status: sessionStatuses[c.sessionId] ?? 'idle',
+                lastActive: c.lastActive
               }))}
               activeId={activeId}
               onSelect={selectConversation}
@@ -1041,7 +1514,7 @@ export default function ChatWindow({
                     >
                       <div style={m.role === 'user' ? userBubbleStyle : botBubbleStyle}>
                         {renderParts(m.parts)}
-                        {streamingHere && last && m.id === last.id ? CARET : null}
+                        {streamingHere && last && m.id === last.id ? <Thinking /> : null}
                       </div>
                     </div>
                   </div>

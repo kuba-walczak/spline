@@ -5,6 +5,8 @@ interface TranscriptPart {
   kind: 'text' | 'tool'
   text: string
   label?: string
+  /** What the call came back with: sources, resolved tool names, or plain text. */
+  outcome?: { links: Array<{ title: string; url: string }>; tools: string[]; text: string }
 }
 
 /** `idle` — no process. `booting` — spawned, nothing heard back yet. `ready` — the CLI has spoken. */
@@ -87,6 +89,9 @@ declare global {
       updateProjectColor: (projectId: string, color: string) => Promise<void>
       updateContextPageContent: (pageId: string, text: string) => Promise<void>
       createContextPage: (projectId: string, title: string, text: string) => Promise<string>
+      /** The instruction prepended to every chat's system prompt, stored as SYSTEM.md. */
+      getSystemMarkdown: () => Promise<string>
+      saveSystemMarkdown: (text: string) => Promise<void>
       getTitleMarkdown: () => Promise<string>
       saveTitleMarkdown: (text: string) => Promise<void>
     }

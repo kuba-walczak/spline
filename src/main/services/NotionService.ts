@@ -1,6 +1,6 @@
 import 'dotenv/config'
 import { readSessionTranscript } from './SessionTranscript'
-import { CONTEXT_SEPARATOR } from '../../shared/injection'
+import { CONTEXT_SEPARATOR, DEFAULT_SYSTEM_PROMPT } from '../../shared/injection'
 
 const NOTION_VERSION = '2025-09-03'
 const CHAT_LOG_DATA_SOURCE_ID = 'efe919c7-c9c1-404e-ac41-2b5210790815'
@@ -695,6 +695,38 @@ async function replaceCodeBlock(pageId: string, language: string, text: string):
         body: JSON.stringify({ children: [{ object: 'block', type: 'code', code }] })
     })
     if (!res.ok) throw new Error(`Notion code block create failed: ${res.status} ${await res.text()}`)
+}
+
+function isSystemMarkdownPage(block: NotionBlock): boolean {
+    return block.type === 'child_page' && block.child_page?.title?.trim().toLowerCase() === 'system.md'
+}
+
+/** Reads the "SYSTEM.md" child page under the Config page — the instruction appended to every
+    chat's system prompt, ahead of any project context.
+
+    Creates the page seeded with the default the first time it is missing, so the instruction is
+    live from the start and editable in Notion from then on. Emptying the page afterwards is
+    honoured: only an absent page is seeded, never a blank one. */
+export async function fetchSystemMarkdown(): Promise<string> {
+    const blocks = await fetchBlockChildren(CONFIG_PAGE_ID)
+    const page = blocks.find(isSystemMarkdownPage)
+
+    if (!page) {
+        await saveSystemMarkdown(DEFAULT_SYSTEM_PROMPT)
+        return DEFAULT_SYSTEM_PROMPT
+    }
+
+    const children = await fetchBlockChildren(page.id)
+    const codeBlock = children.find((b) => b.type === 'code')
+    return codeBlock ? plainText(codeBlock.code?.rich_text) : ''
+}
+
+export async function saveSystemMarkdown(text: string): Promise<void> {
+    const blocks = await fetchBlockChildren(CONFIG_PAGE_ID)
+    const existing = blocks.find(isSystemMarkdownPage)
+    const pageId = existing ? existing.id : await createChildPage(CONFIG_PAGE_ID, 'SYSTEM.md')
+
+    await replaceCodeBlock(pageId, 'markdown', text)
 }
 
 function isTitleMarkdownPage(block: NotionBlock): boolean {

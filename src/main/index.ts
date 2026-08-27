@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, IpcMainEvent, Menu } from 'electron'
+import { app, BrowserWindow, ipcMain, IpcMainEvent, Menu, shell } from 'electron'
 import { join } from 'path'
 import { is } from '@electron-toolkit/utils'
 import { disconnectAllDevices, getStreamDeck, setAllDevicesSolidColor, setLedStripSolidColor } from './services/DeviceManager'
@@ -20,11 +20,13 @@ import {
   createContextPage,
   createProjectPage,
   fetchChatLog,
+  fetchSystemMarkdown,
   fetchTitleMarkdown,
   fetchProjectContext,
   fetchProjectVersion,
   fetchProjectDetail,
   fetchProjects,
+  saveSystemMarkdown,
   saveTitleMarkdown,
   setChatEffort,
   setChatModel,
@@ -79,6 +81,36 @@ function createChatWindow(): BrowserWindow {
       preload: join(__dirname, '../preload/index.js'),
       sandbox: false
     }
+  })
+
+  /* Links in a reply — a search result, a citation — belong in the user's own browser, with their
+     session and extensions, not in a chrome-less Electron window that cannot navigate. Only http(s)
+     is handed over: `shell.openExternal` will launch whatever a `file:` or custom-scheme URL is
+     registered to, and those can arrive from model output or a fetched page. */
+  const openExternally = (url: string): boolean => {
+    let parsed: URL
+    try {
+      parsed = new URL(url)
+    } catch {
+      return false
+    }
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return false
+    void shell.openExternal(url)
+    return true
+  }
+
+  chatWindow.webContents.setWindowOpenHandler(({ url }) => {
+    openExternally(url)
+    /* Denied either way: an app window is never the right home for one of these. */
+    return { action: 'deny' }
+  })
+
+  /* `target="_blank"` goes through the handler above; a plain link does not, and would replace the
+     app itself with the page. */
+  chatWindow.webContents.on('will-navigate', (event, url) => {
+    if (url === chatWindow?.webContents.getURL()) return
+    event.preventDefault()
+    openExternally(url)
   })
 
   chatWindow.once('ready-to-show', () => chatWindow?.show())
@@ -328,6 +360,14 @@ ipcMain.handle('notion:updateContextPageContent', async (_event, pageId: string,
 
 ipcMain.handle('notion:createContextPage', async (_event, projectId: string, title: string, text: string) => {
   return createContextPage(projectId, title, text)
+})
+
+ipcMain.handle('notion:getSystemMarkdown', async () => {
+  return fetchSystemMarkdown()
+})
+
+ipcMain.handle('notion:saveSystemMarkdown', async (_event, text: string) => {
+  await saveSystemMarkdown(text)
 })
 
 ipcMain.handle('notion:getTitleMarkdown', async () => {

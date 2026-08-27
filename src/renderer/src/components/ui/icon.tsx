@@ -15,7 +15,9 @@ import {
   CornerRightDown,
   Download,
   EllipsisVertical,
+  FileText,
   Folder,
+  Globe,
   House,
   Info,
   Lock,
@@ -29,7 +31,9 @@ import {
   Redo2,
   RefreshCw,
   Search,
+  Settings,
   SlidersHorizontal,
+  Terminal,
   Wrench,
   X
 } from 'lucide-react'
@@ -73,7 +77,9 @@ const ICONS: Record<string, LucideIcon> = {
   'corner-right-down': CornerRightDown,
   download: Download,
   'ellipsis-vertical': EllipsisVertical,
+  'file-text': FileText,
   folder: Folder,
+  globe: Globe,
   house: House,
   info: Info,
   lock: Lock,
@@ -88,7 +94,9 @@ const ICONS: Record<string, LucideIcon> = {
   redo: Redo2,
   'refresh-cw': RefreshCw,
   search: Search,
+  settings: Settings,
   'sliders-horizontal': SlidersHorizontal,
+  terminal: Terminal,
   wrench: Wrench,
   x: X
 }

@@ -134,6 +134,47 @@ interface ContextCardItem {
   onOpen: () => void
 }
 
+/** A grey block standing in for content still loading. Sized to whatever it replaces, so the panel
+    does not resize when the real thing arrives. */
+function Skeleton({
+  width = '100%',
+  height,
+  radius,
+  delay = 0
+}: {
+  width?: string | number
+  height: number
+  radius?: number | string
+  /** Offsets the sweep so a stack of these reads as one pass rather than several in lockstep. */
+  delay?: number
+}): ReactElement {
+  return (
+    <div
+      className="pdskeleton"
+      style={{ width, height, borderRadius: radius, animationDelay: delay ? `${delay}s` : undefined }}
+    />
+  )
+}
+
+/** Stand-in for the context grid: cards at the same 152x125 the real ones use, so the panel keeps
+    its height and nothing below it jumps. */
+function ContextCardsSkeleton(): ReactElement {
+  return (
+    <div
+      style={{
+        display: 'grid',
+        gridTemplateColumns: 'repeat(auto-fill, 152px)',
+        justifyContent: 'start',
+        gap: 12
+      }}
+    >
+      {[0, 1, 2].map((i) => (
+        <Skeleton key={i} height={125} radius={8} delay={i * 0.12} />
+      ))}
+    </div>
+  )
+}
+
 function ContextCards({ items }: { items: ContextCardItem[] }): ReactElement {
   return (
     <div
@@ -925,25 +966,29 @@ export default function ProjectDetailView({
                   />
                 ) : null}
               </div>
-              <label
-                style={{
-                  display: 'block',
-                  width: '100%',
-                  height: 28,
-                  boxSizing: 'border-box',
-                  borderRadius: 'var(--radius-sm)',
-                  background: color,
-                  border: '1px solid var(--border-default)',
-                  cursor: 'pointer'
-                }}
-              >
-                <input
-                  type="color"
-                  value={color}
-                  onChange={(e) => setColorDraft(e.target.value)}
-                  style={{ width: 0, height: 0, opacity: 0, position: 'absolute' }}
-                />
-              </label>
+              {loading ? (
+                <Skeleton height={28} />
+              ) : (
+                <label
+                  style={{
+                    display: 'block',
+                    width: '100%',
+                    height: 28,
+                    boxSizing: 'border-box',
+                    borderRadius: 'var(--radius-sm)',
+                    background: color,
+                    border: '1px solid var(--border-default)',
+                    cursor: 'pointer'
+                  }}
+                >
+                  <input
+                    type="color"
+                    value={color}
+                    onChange={(e) => setColorDraft(e.target.value)}
+                    style={{ width: 0, height: 0, opacity: 0, position: 'absolute' }}
+                  />
+                </label>
+              )}
             </div>
 
             <div style={panelStyle()}>
@@ -971,6 +1016,7 @@ export default function ProjectDetailView({
                     icon="pencil"
                     label={editingInstructions ? 'Cancel edit' : 'Edit instructions'}
                     size="sm"
+                    disabled={loading}
                     active={editingInstructions}
                     onClick={() => {
                       if (editingInstructions) {
@@ -983,7 +1029,13 @@ export default function ProjectDetailView({
                   />
                 </div>
               </div>
-              {editingInstructions ? (
+              {loading ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                  <Skeleton height={12} />
+                  <Skeleton height={12} delay={0.1} />
+                  <Skeleton height={12} width="62%" delay={0.2} />
+                </div>
+              ) : editingInstructions ? (
                 <textarea
                   value={instructionsDraft}
                   onChange={(e) => setInstructionsDraft(e.target.value)}
@@ -1011,7 +1063,7 @@ export default function ProjectDetailView({
                 <IconButton icon="plus" label="Add context" size="sm" onClick={() => setCreatingContext(true)} />
               </div>
               {loading ? (
-                <span style={emptyStyle}>Loading…</span>
+                <ContextCardsSkeleton />
               ) : error ? (
                 <span style={emptyStyle}>Couldn&apos;t load this project.</span>
               ) : contextItems.length === 0 ? (

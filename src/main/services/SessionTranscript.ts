@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { homedir } from 'node:os'
 import { app } from 'electron'
 import { stripInjectedBlocks } from '../../shared/injection'
+import { outcomeFromToolResult, type ToolOutcome } from '../../shared/toolResults'
 
 /* Reads a chat back from the CLI's own session transcript.
 
@@ -35,6 +36,9 @@ export interface TranscriptPart {
     text: string
     /** Tool name, for `tool` parts. */
     label?: string
+    /** What the call came back with, correlated from its `tool_result` — sources for a search,
+        tool names for a lookup, plain text for everything else. */
+    outcome?: ToolOutcome
 }
 
 export interface TranscriptMessage {
@@ -47,6 +51,10 @@ interface ContentBlock {
     text?: string
     name?: string
     input?: unknown
+    /** Set on `tool_use`; the id a later `tool_result` answers. */
+    id?: string
+    tool_use_id?: string
+    content?: unknown
 }
 
 interface TranscriptLine {
@@ -84,12 +92,22 @@ function findLeaf(lines: TranscriptLine[], byId: Map<string, TranscriptLine>): s
     return tips.reduce((best, l) => ((l.timestamp ?? '') > (best.timestamp ?? '') ? l : best)).uuid ?? null
 }
 
-function partsOf(role: 'user' | 'assistant', content: ContentBlock[]): TranscriptPart[] {
+function partsOf(
+    role: 'user' | 'assistant',
+    content: ContentBlock[],
+    outcomeByToolId: Map<string, ToolOutcome>
+): TranscriptPart[] {
     const parts: TranscriptPart[] = []
 
     for (const block of content) {
         if (block.type === 'tool_use') {
-            parts.push({ kind: 'tool', label: block.name ?? 'tool', text: queryOf(block.input) })
+            const outcome = block.id ? outcomeByToolId.get(block.id) : undefined
+            parts.push({
+                kind: 'tool',
+                label: block.name ?? 'tool',
+                text: queryOf(block.input),
+                ...(outcome ? { outcome } : null)
+            })
             continue
         }
         if (block.type !== 'text' || !block.text) continue
@@ -138,6 +156,23 @@ export function readSessionTranscript(sessionId: string): TranscriptMessage[] {
     const byId = new Map<string, TranscriptLine>()
     for (const line of lines) if (line.uuid) byId.set(line.uuid, line)
 
+    /* Gathered from every line rather than from the branch walked below. Parallel tool calls have
+       their results recorded as siblings — each `tool_result` hangs off the `tool_use` it answers,
+       so only one of them lies on any single path. Reading them off the chain would show the
+       sources for one search and silently drop the rest. */
+    const outcomeByToolId = new Map<string, ToolOutcome>()
+    for (const line of lines) {
+        const raw = line.message?.content
+        if (!Array.isArray(raw)) continue
+        for (const block of raw) {
+            if (block.type !== 'tool_result' || !block.tool_use_id) continue
+            const outcome = outcomeFromToolResult(block.content)
+            if (outcome.links.length > 0 || outcome.tools.length > 0 || outcome.text) {
+                outcomeByToolId.set(block.tool_use_id, outcome)
+            }
+        }
+    }
+
     const chain: TranscriptLine[] = []
     let cursor = findLeaf(lines, byId)
     const guard = new Set<string>()
@@ -155,7 +190,7 @@ export function readSessionTranscript(sessionId: string): TranscriptMessage[] {
 
         const raw = line.message?.content
         const content: ContentBlock[] = typeof raw === 'string' ? [{ type: 'text', text: raw }] : raw ?? []
-        const parts = partsOf(line.type, content)
+        const parts = partsOf(line.type, content, outcomeByToolId)
 
         /* A `user` line holding only tool_result is the harness feeding a tool's output back,
            not a turn the person took — it must not render as a user bubble. */

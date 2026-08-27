@@ -1,8 +1,10 @@
 import { useState } from 'react'
 import type { ReactElement } from 'react'
 import { DeviceDebug } from './DeviceDebug'
+import { Icon } from '@/components/ui/icon'
 import { IconButton } from '@/components/ui/icon-button'
 import { NavItem } from '@/components/ui/nav-item'
+import { relativeTime } from '@/lib/relativeTime'
 import { SectionLabel } from '@/components/ui/section-label'
 import { SegmentedControl } from '@/components/ui/segmented-control'
 
@@ -12,9 +14,12 @@ import { SegmentedControl } from '@/components/ui/segmented-control'
 export interface SidebarConversation {
   id: number
   title: string
-  colors?: string[]
+  /** Projects attached to this chat, shown as one folder each to the left of the title. */
+  projects?: SidebarProject[]
   /** Lifecycle of this chat's CLI process, shown as the row's leading dot. */
   status?: SessionStatus
+  /** ISO timestamp of the chat's last message, rendered as "5 minutes ago" while the row is idle. */
+  lastActive?: string | null
 }
 
 export type SessionStatus = 'idle' | 'booting' | 'ready'
@@ -58,13 +63,6 @@ function StatusDot({ status }: { status: SessionStatus }): ReactElement {
   )
 }
 
-/** Right-to-left tint: one color fades to transparent, several are spread as stops before the fade. */
-function tintGradient(colors: string[]): string | undefined {
-  if (colors.length === 0) return undefined
-  if (colors.length === 1) return `linear-gradient(to right, ${colors[0]}, transparent)`
-  return `linear-gradient(to right, ${colors.join(', ')}, transparent)`
-}
-
 export interface SidebarProject {
   id: string
   title: string
@@ -86,16 +84,53 @@ export interface SidebarProps {
   onNavigate: (route: string) => void
 }
 
+/** A project's folder: stroked in the project's colour, filled with the same colour at 80%.
+
+    `color-mix` rather than an alpha suffix on the hex, so it works just as well for the
+    `var(--text-muted)` fallback as for a project's own colour. The inline `fill` beats the
+    `fill="none"` attribute lucide sets — presentation attributes lose to CSS.
+
+    Sized and boxed to match NavItem's own leading glyph, so project rows and chat rows line up. */
+function ProjectFolder({ color }: { color: string | null }): ReactElement {
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        width: '16px',
+        justifyContent: 'center',
+        flex: '0 0 auto',
+        color: color ?? 'var(--text-muted)'
+      }}
+    >
+      <Icon
+        name="folder"
+        size={16}
+        strokeWidth={2.25}
+        style={{ fill: 'color-mix(in srgb, currentColor 80%, transparent)' }}
+      />
+    </span>
+  )
+}
+
+/** Hover and selected background for chat rows — deliberately quieter than the shared
+    `--surface-hover` used by the nav items above them. */
+const CHAT_ROW_HIGHLIGHT = '#232323'
+
 interface ChatRowProps {
   conversation: SidebarConversation
   active: boolean
   onSelect: () => void
   onDelete: () => void
+  onOpenProject: (id: string) => void
 }
 
-function ChatRow({ conversation, active, onSelect, onDelete }: ChatRowProps): ReactElement {
+function ChatRow({ conversation, active, onSelect, onDelete, onOpenProject }: ChatRowProps): ReactElement {
   const [hover, setHover] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+
+  /* Recomputed on every render rather than kept in state — the parent re-renders on its poll tick,
+     which is what advances these labels. */
+  const age = relativeTime(conversation.lastActive)
 
   return (
     <div
@@ -104,38 +139,79 @@ function ChatRow({ conversation, active, onSelect, onDelete }: ChatRowProps): Re
       onMouseLeave={() => setHover(false)}
     >
       <NavItem
-        leading={<StatusDot status={conversation.status ?? 'idle'} />}
+        leading={
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', flex: '0 0 auto' }}>
+            <StatusDot status={conversation.status ?? 'idle'} />
+            {(conversation.projects ?? []).map((project) => (
+              /* A span rather than a button: this already sits inside NavItem's <button>, and
+                 nesting one inside another is invalid. Stopping propagation is what keeps the
+                 folder from also selecting the chat. */
+              <span
+                key={project.id}
+                role="button"
+                tabIndex={-1}
+                title={`Open ${project.title}`}
+                onClick={(event) => {
+                  event.stopPropagation()
+                  onOpenProject(project.id)
+                }}
+                style={{ display: 'inline-flex', flex: '0 0 auto', cursor: 'pointer' }}
+              >
+                <ProjectFolder color={project.color} />
+              </span>
+            ))}
+          </span>
+        }
         label={conversation.title}
         active={active}
+        highlight={CHAT_ROW_HIGHLIGHT}
+        hovered={hover || menuOpen}
         onClick={onSelect}
+        /* In the flex row rather than floating over it, so a long title is squeezed and ellipsised
+           by the label's own overflow rules instead of running underneath the age. */
+        trailing={
+          !hover && !menuOpen && age ? (
+            <span
+              style={{
+                flex: '0 0 auto',
+                marginLeft: '2px',
+                font: 'var(--type-meta)',
+                letterSpacing: 'var(--tracking-tight)',
+                color: 'var(--text-faint)',
+                whiteSpace: 'nowrap'
+              }}
+            >
+              {age}
+            </span>
+          ) : null
+        }
       />
-      {conversation.colors && conversation.colors.length > 0 ? (
-        <div
-          style={{
-            position: 'absolute',
-            inset: 0,
-            borderRadius: 'var(--radius-sm)',
-            background: tintGradient(conversation.colors),
-            mixBlendMode: 'screen',
-            pointerEvents: 'none'
-          }}
-        />
-      ) : null}
+      {/* The age and the options button occupy the same corner, so they trade places: the age is
+          ambient information, and the moment there is something to click it gets out of the way. */}
       {hover || menuOpen ? (
         <div
           style={{
             position: 'absolute',
-            top: '50%',
-            right: 4,
-            transform: 'translateY(-50%)'
+            top: 4,
+            bottom: 4,
+            right: 4
           }}
         >
+          {/* Square, and inset from the row's edges by the same 4px on all four sides, so its
+              highlight sits neatly inside the row's own rather than filling it edge to edge. */}
           <IconButton
             icon="ellipsis-vertical"
             label="Chat options"
             size="sm"
             active={menuOpen}
             onClick={() => setMenuOpen((v) => !v)}
+            style={{
+              width: 'calc(var(--row-height) - 8px)',
+              height: 'calc(var(--row-height) - 8px)',
+              /* Tighter than the button default: nested inside the row's own --radius-sm corners,
+                 an 8px radius on an 18px square reads almost circular. */
+              borderRadius: 'var(--radius-xs)'
+            }}
           />
         </div>
       ) : null}
@@ -264,26 +340,13 @@ export function Sidebar({
             {projects.length > 0 ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--row-gap)' }}>
                 {projects.map((p) => (
-                  <div key={p.id} style={{ position: 'relative' }}>
-                    <NavItem
-                      icon="folder"
-                      label={p.title}
-                      active={p.id === activeProjectId}
-                      onClick={() => onSelectProject(p.id)}
-                    />
-                    {p.color ? (
-                      <div
-                        style={{
-                          position: 'absolute',
-                          inset: 0,
-                          borderRadius: 'var(--radius-sm)',
-                          background: `linear-gradient(to right, ${p.color}, transparent)`,
-                          mixBlendMode: 'screen',
-                          pointerEvents: 'none'
-                        }}
-                      />
-                    ) : null}
-                  </div>
+                  <NavItem
+                    key={p.id}
+                    leading={<ProjectFolder color={p.color} />}
+                    label={p.title}
+                    active={p.id === activeProjectId}
+                    onClick={() => onSelectProject(p.id)}
+                  />
                 ))}
               </div>
             ) : (
@@ -313,6 +376,7 @@ export function Sidebar({
                     active={c.id === activeId}
                     onSelect={() => onSelect(c.id)}
                     onDelete={() => onDelete(c.id)}
+                    onOpenProject={onSelectProject}
                   />
                 ))}
               </div>

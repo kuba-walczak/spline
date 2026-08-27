@@ -73,3 +73,33 @@ a:hover {
   height: 100%;
   min-height: 0;
 }
+
+
+/* Loading placeholders. A highlight band sweeps diagonally across the base fill: the gradient is a
+   background-image over a background-color, so only the band moves and the base stays put. */
+@keyframes pdskeleton-sweep {
+  from { background-position: 160% 0; }
+  to { background-position: -60% 0; }
+}
+.pdskeleton {
+  background-color: #2b2b29;
+  background-image: linear-gradient(
+    115deg,
+    rgba(255, 255, 255, 0) 38%,
+    rgba(255, 255, 255, 0.075) 50%,
+    rgba(255, 255, 255, 0) 62%
+  );
+  background-size: 220% 100%;
+  background-repeat: no-repeat;
+  border-radius: var(--radius-sm);
+  /* `backwards` matters here: the staggered elements have an animation-delay, and without it they
+     would sit at the static background-position through the delay and then snap to the first
+     keyframe. Filling backwards holds them at the start of the sweep instead. */
+  animation: pdskeleton-sweep 1.6s ease-in-out infinite backwards;
+}
+@media (prefers-reduced-motion: reduce) {
+  .pdskeleton {
+    background-image: none;
+    animation: none;
+  }
+}
