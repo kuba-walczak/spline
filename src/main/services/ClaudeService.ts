@@ -1,12 +1,64 @@
 import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process'
-import { writeFileSync } from 'node:fs'
+import { writeFileSync, existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { tmpdir } from 'node:os'
+import { tmpdir, homedir } from 'node:os'
 import { EventEmitter } from 'node:events'
+import { sessionCwd, sessionFilePath } from './SessionTranscript'
 
 const noHooksSettingsPath = join(tmpdir(), 'jarvis-claude-settings.json')
 writeFileSync(noHooksSettingsPath, JSON.stringify({ hooks: {} }))
 
+/* The real binary, not the `claude` on PATH — that is an npm-generated .cmd stub, and Windows
+   cannot execute one of those without a shell. Going through a shell is what we are avoiding:
+   it caps the command line at 8191 characters, eats newlines, and expands `%VAR%` inside the
+   arguments, none of which survive contact with injected project text.
+
+   Hardcoded because npm replaces package contents in place, so the path outlives version
+   updates. It only moves if the CLI is reinstalled by another method — hence the override. */
+const CLAUDE_EXE =
+    process.env.JARVIS_CLAUDE_PATH ??
+    join(homedir(), 'AppData', 'Roaming', 'npm', 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe')
+
+/** Fails at startup rather than on the first send, where a missing binary would surface as a chat
+    that silently never replies. */
+export function assertClaudeExe(): void {
+    if (!existsSync(CLAUDE_EXE)) {
+        throw new Error(`claude binary missing at ${CLAUDE_EXE} — set JARVIS_CLAUDE_PATH to override`)
+    }
+}
+
+const ALLOWED_TOOLS = [
+    'WebSearch',
+    'WebFetch',
+    'mcp__claude_ai_Notion__notion-convert-page-to-skill',
+    'mcp__claude_ai_Notion__notion-create-attachment',
+    'mcp__claude_ai_Notion__notion-create-comment',
+    'mcp__claude_ai_Notion__notion-create-database',
+    'mcp__claude_ai_Notion__notion-create-file-upload',
+    'mcp__claude_ai_Notion__notion-create-folder',
+    'mcp__claude_ai_Notion__notion-create-pages',
+    'mcp__claude_ai_Notion__notion-create-view',
+    'mcp__claude_ai_Notion__notion-download-attachment',
+    'mcp__claude_ai_Notion__notion-duplicate-page',
+    'mcp__claude_ai_Notion__notion-fetch',
+    'mcp__claude_ai_Notion__notion-get-async-task',
+    'mcp__claude_ai_Notion__notion-get-comments',
+    'mcp__claude_ai_Notion__notion-get-teams',
+    'mcp__claude_ai_Notion__notion-get-users',
+    'mcp__claude_ai_Notion__notion-list-favorite-pages',
+    'mcp__claude_ai_Notion__notion-list-private-pages',
+    'mcp__claude_ai_Notion__notion-list-recent-pages',
+    'mcp__claude_ai_Notion__notion-list-shared-pages',
+    'mcp__claude_ai_Notion__notion-move-pages',
+    'mcp__claude_ai_Notion__notion-query-data-sources',
+    'mcp__claude_ai_Notion__notion-query-database-view',
+    'mcp__claude_ai_Notion__notion-query-meeting-notes',
+    'mcp__claude_ai_Notion__notion-search',
+    'mcp__claude_ai_Notion__notion-search-agents',
+    'mcp__claude_ai_Notion__notion-update-data-source',
+    'mcp__claude_ai_Notion__notion-update-page',
+    'mcp__claude_ai_Notion__notion-update-view'
+].join(' ')
 
 interface ResultEvent {
     type: 'result'
@@ -14,152 +66,205 @@ interface ResultEvent {
     result?: string
 }
 
-interface SystemInitEvent {
-    type: 'system'
-    subtype: 'init'
-    session_id: string
-}
-
-/** Emits every parsed stream-json line (system/assistant/user/result), unfiltered. */
+/** Emits `{ sessionId, event }` for every parsed stream-json line, unfiltered, and
+    `{ sessionId, status }` on 'status' as a chat's process comes up or goes away. The id is what
+    lets the renderer route either to the chat it belongs to — several sessions run at once. */
 export const claudeEvents = new EventEmitter()
 
-let child: ChildProcessWithoutNullStreams | null = null
-let buffer = ''
-const queue: Array<{ resolve: (value: string) => void; reject: (error: Error) => void }> = []
-/** True from the moment a headless CLI process spawns until the first prompt is sent to it —
-    the app's cue that this process has no memory of any prior conversation. */
-let needsGuidelines = true
+/** `idle` — no process. `booting` — spawned, nothing heard back yet. `ready` — the CLI has spoken. */
+export type SessionStatus = 'idle' | 'booting' | 'ready'
 
-let currentModel = 'sonnet'
-let currentEffort = 'medium'
-/** Set from the `system init` event of the running process — passed to `--resume` when
-    respawning with a different model so the new process picks up the same conversation. */
-let sessionId: string | null = null
-
-function quoteArg(arg: string): string {
-    return `"${arg.replace(/"/g, '""')}"`
+interface Session {
+    proc: ChildProcessWithoutNullStreams
+    buffer: string
+    queue: Array<{ resolve: (value: string) => void; reject: (error: Error) => void }>
+    /** What this process was spawned with — a change means it has to be replaced. */
+    model: string
+    effort: string
+    systemPrompt: string
+    /** True until the CLI produces its first line. Boot takes over a second from cold, and
+        longer when `--resume` has a large transcript to replay. */
+    booting: boolean
 }
 
-function handleLine(line: string): void {
+/** Used for chats whose row carries no preference yet, and for the voice session, which has no row. */
+export const DEFAULT_MODEL = 'opus'
+export const DEFAULT_EFFORT = 'high'
+
+/** One live CLI process per chat, keyed by the chat's session id. Processes stay up until the
+    chat is closed or the app quits; conversation state lives in the CLI's own session
+    transcript, so killing one loses nothing that `--resume` cannot restore. */
+const sessions = new Map<string, Session>()
+
+function setStatus(sessionId: string, status: SessionStatus): void {
+    claudeEvents.emit('status', { sessionId, status })
+}
+
+/** Current status of every chat with a live process — everything else is `idle`. Lets a renderer
+    that started late paint the right state without waiting for the next transition. */
+export function getSessionStatuses(): Record<string, SessionStatus> {
+    return Object.fromEntries([...sessions].map(([id, s]) => [id, s.booting ? 'booting' : 'ready']))
+}
+
+/* Appended context travels as a file rather than as an argument. The CLI reads it at spawn — a
+   rewrite under a live process changes nothing until that process is replaced, which is exactly
+   the refresh model the app wants. One file per chat, so concurrent sessions cannot overwrite
+   each other's context. */
+function systemPromptPath(sessionId: string): string {
+    return join(tmpdir(), `jarvis-system-prompt-${sessionId}.txt`)
+}
+
+function clearSystemPromptFile(sessionId: string): void {
+    rmSync(systemPromptPath(sessionId), { force: true })
+}
+
+/** Writes the file and returns the flags that point at it — empty when there is nothing to append,
+    so a chat with no attached projects spawns exactly as it did before. */
+function systemPromptArgs(sessionId: string, systemPrompt: string): string[] {
+    if (!systemPrompt.trim()) {
+        clearSystemPromptFile(sessionId)
+        return []
+    }
+
+    const path = systemPromptPath(sessionId)
+    writeFileSync(path, systemPrompt, 'utf8')
+    return ['--append-system-prompt-file', path]
+}
+
+function handleLine(sessionId: string, session: Session, line: string): void {
     if (!line.trim()) return
 
-    const event = JSON.parse(line) as Record<string, unknown>
-    claudeEvents.emit('event', event)
+    /* Output from a process that has already been replaced belongs to a conversation turn nobody
+       is waiting on any more — attributing it to the live session would clear its booting flag and
+       settle its queue with a stale result. */
+    if (sessions.get(sessionId) !== session) return
 
-    if (event.type === 'system' && (event as unknown as SystemInitEvent).subtype === 'init') {
-        sessionId = (event as unknown as SystemInitEvent).session_id
+    let event: Record<string, unknown>
+    try {
+        event = JSON.parse(line) as Record<string, unknown>
+    } catch {
+        return
     }
+
+    /* Any line at all proves the CLI is up — the first one is a startup `system` message, well
+       before the model replies, so the indicator clears honestly rather than tracking the turn. */
+    if (session.booting) {
+        session.booting = false
+        setStatus(sessionId, 'ready')
+    }
+
+    claudeEvents.emit('event', { sessionId, event })
 
     if (event.type !== 'result') return
 
-    const result = event as unknown as ResultEvent
-    const pending = queue.shift()
+    const pending = session.queue.shift()
     if (!pending) return
 
-    if (result.is_error) {
-        pending.reject(new Error(result.result ?? 'Claude request failed'))
-    } else {
-        pending.resolve(result.result ?? '')
-    }
+    const result = event as unknown as ResultEvent
+    if (result.is_error) pending.reject(new Error(result.result ?? 'Claude request failed'))
+    else pending.resolve(result.result ?? '')
 }
 
-function ensureProcess(): ChildProcessWithoutNullStreams {
-    if (child) return child
+function ensureSession(sessionId: string, model: string, effort: string, systemPrompt: string): Session {
+    const existing = sessions.get(sessionId)
+    /* Model, effort and the appended system prompt are all fixed at spawn, so changing any of them
+       means replacing the process. The conversation is unaffected: the replacement resumes the same
+       session transcript, and the CLI rebuilds its system prompt from the flags each time rather
+       than restoring whatever the session started with. */
+    if (existing && existing.model === model && existing.effort === effort && existing.systemPrompt === systemPrompt) {
+        return existing
+    }
+    if (existing) stopSession(sessionId)
+
+    /* A session file on disk means the CLI already knows this id, so it must be resumed rather
+       than declared. Deriving that from the file (instead of tracking a flag) survives an app
+       restart, and self-heals if the transcript was cleaned up under us. */
+    const resuming = existsSync(sessionFilePath(sessionId))
 
     const args = [
         '-p',
         '--input-format', 'stream-json',
         '--output-format', 'stream-json',
-        '--allowedTools', [
-            'WebSearch',
-            'WebFetch',
-            'mcp__claude_ai_Notion__notion-convert-page-to-skill',
-            'mcp__claude_ai_Notion__notion-create-attachment',
-            'mcp__claude_ai_Notion__notion-create-comment',
-            'mcp__claude_ai_Notion__notion-create-database',
-            'mcp__claude_ai_Notion__notion-create-file-upload',
-            'mcp__claude_ai_Notion__notion-create-folder',
-            'mcp__claude_ai_Notion__notion-create-pages',
-            'mcp__claude_ai_Notion__notion-create-view',
-            'mcp__claude_ai_Notion__notion-download-attachment',
-            'mcp__claude_ai_Notion__notion-duplicate-page',
-            'mcp__claude_ai_Notion__notion-fetch',
-            'mcp__claude_ai_Notion__notion-get-async-task',
-            'mcp__claude_ai_Notion__notion-get-comments',
-            'mcp__claude_ai_Notion__notion-get-teams',
-            'mcp__claude_ai_Notion__notion-get-users',
-            'mcp__claude_ai_Notion__notion-list-favorite-pages',
-            'mcp__claude_ai_Notion__notion-list-private-pages',
-            'mcp__claude_ai_Notion__notion-list-recent-pages',
-            'mcp__claude_ai_Notion__notion-list-shared-pages',
-            'mcp__claude_ai_Notion__notion-move-pages',
-            'mcp__claude_ai_Notion__notion-query-data-sources',
-            'mcp__claude_ai_Notion__notion-query-database-view',
-            'mcp__claude_ai_Notion__notion-query-meeting-notes',
-            'mcp__claude_ai_Notion__notion-search',
-            'mcp__claude_ai_Notion__notion-search-agents',
-            'mcp__claude_ai_Notion__notion-update-data-source',
-            'mcp__claude_ai_Notion__notion-update-page',
-            'mcp__claude_ai_Notion__notion-update-view'
-        ].join(' '),
+        '--allowedTools', ALLOWED_TOOLS,
         '--verbose',
-        '--model', currentModel,
-        '--effort', currentEffort,
+        /* Drops cwd, env info, memory paths and git status from the system prompt. A chat app has
+           no use for any of it, and it is charged on every turn of every session. */
+        '--exclude-dynamic-system-prompt-sections',
+        '--model', model,
+        '--effort', effort,
         '--settings', noHooksSettingsPath,
-        ...(sessionId ? ['--resume', sessionId] : [])
-    ].map(quoteArg).join(' ')
+        /* Written before the spawn, never after: the CLI reads the file as it starts, so a later
+           write would land too late for this process and leave it running stale context. */
+        ...systemPromptArgs(sessionId, systemPrompt),
+        ...(resuming ? ['--resume', sessionId] : ['--session-id', sessionId])
+    ]
 
-    const proc = spawn(`claude ${args}`, { shell: true })
+    const proc = spawn(CLAUDE_EXE, args, { cwd: sessionCwd() })
     proc.stdout.setEncoding('utf8')
 
+    const session: Session = { proc, buffer: '', queue: [], model, effort, systemPrompt, booting: true }
+
     proc.stdout.on('data', (chunk: string) => {
-        buffer += chunk
+        session.buffer += chunk
         let newlineIndex: number
-        while ((newlineIndex = buffer.indexOf('\n')) >= 0) {
-            const line = buffer.slice(0, newlineIndex)
-            buffer = buffer.slice(newlineIndex + 1)
-            handleLine(line)
+        while ((newlineIndex = session.buffer.indexOf('\n')) >= 0) {
+            const line = session.buffer.slice(0, newlineIndex)
+            session.buffer = session.buffer.slice(newlineIndex + 1)
+            handleLine(sessionId, session, line)
         }
     })
 
-    proc.on('exit', () => {
-        child = null
-        buffer = ''
-        needsGuidelines = true
-        const pending = queue.splice(0)
-        pending.forEach((p) => p.reject(new Error('Claude process exited')))
+    /* Both endings land here: a normal exit, and a spawn failure. Spawning the binary directly
+       means a missing or broken one now raises `error` — under `shell: true` it could not, because
+       the shell itself started fine and merely exited non-zero. `error` may fire without any
+       `exit` following it, so the teardown has to be shared or a failed spawn would leave the chat
+       registered and waiting on a promise that never settles. */
+    const teardown = (reason: string): void => {
+        /* A model or effort switch replaces the process, and the outgoing one ends after its
+           replacement is already registered. Without this guard that late ending would evict the
+           live session from the map and report the chat as idle while it is starting up. */
+        if (sessions.get(sessionId) !== session) return
+
+        sessions.delete(sessionId)
+        if (session.booting) console.error(`[claude] session ${sessionId} ${reason} during startup`)
+        setStatus(sessionId, 'idle')
+        session.queue.splice(0).forEach((p) => p.reject(new Error(`Claude process ${reason}`)))
+    }
+
+    proc.on('exit', (code) => teardown(`exited (code ${code})`))
+
+    proc.on('error', (error) => {
+        console.error(`[claude] session ${sessionId} failed to spawn:`, error)
+        teardown('failed to spawn')
     })
 
-    child = proc
-    needsGuidelines = true
-    return proc
+    sessions.set(sessionId, session)
+    setStatus(sessionId, 'booting')
+    return session
 }
 
-/** Spawns the process if needed and reports whether it hasn't been sent a prompt yet, consuming that fact
-    so subsequent calls report false until the process is replaced. */
-export function consumeNeedsGuidelines(): boolean {
-    ensureProcess()
-    const was = needsGuidelines
-    needsGuidelines = false
-    return was
-}
-
-export function askClaude(prompt: string): Promise<string> {
-    const proc = ensureProcess()
+export function askClaude(
+    sessionId: string,
+    prompt: string,
+    model: string = DEFAULT_MODEL,
+    effort: string = DEFAULT_EFFORT,
+    systemPrompt: string = ''
+): Promise<string> {
+    const session = ensureSession(sessionId, model, effort, systemPrompt)
 
     return new Promise((resolve, reject) => {
-        queue.push({ resolve, reject })
+        session.queue.push({ resolve, reject })
 
         const message = {
             type: 'user',
             message: { role: 'user', content: [{ type: 'text', text: prompt }] }
         }
-        proc.stdin.write(JSON.stringify(message) + '\n')
+        session.proc.stdin.write(JSON.stringify(message) + '\n')
     })
 }
 
-/** One-off, isolated headless call — its own process, no shared queue/session state, always haiku.
-    Used to summarize a chat's title; never touches the persistent conversation in `child`. */
+/** One-off, isolated headless call — its own process, no shared queue, always haiku, and
+    explicitly not persisted so it never litters the transcript directory with pseudo-chats. */
 export function generateChatTitle(prompt: string): Promise<string> {
     return new Promise((resolve, reject) => {
         const args = [
@@ -167,11 +272,13 @@ export function generateChatTitle(prompt: string): Promise<string> {
             '--input-format', 'stream-json',
             '--output-format', 'stream-json',
             '--verbose',
+            '--exclude-dynamic-system-prompt-sections',
             '--model', 'haiku',
+            '--no-session-persistence',
             '--settings', noHooksSettingsPath
-        ].map(quoteArg).join(' ')
+        ]
 
-        const proc = spawn(`claude ${args}`, { shell: true })
+        const proc = spawn(CLAUDE_EXE, args, { cwd: sessionCwd() })
         proc.stdout.setEncoding('utf8')
         let buf = ''
         let settled = false
@@ -183,18 +290,33 @@ export function generateChatTitle(prompt: string): Promise<string> {
                 const line = buf.slice(0, newlineIndex)
                 buf = buf.slice(newlineIndex + 1)
                 if (!line.trim()) continue
-                const event = JSON.parse(line) as Record<string, unknown>
-                if (event.type === 'result') {
-                    settled = true
-                    const result = event as unknown as ResultEvent
-                    if (result.is_error) reject(new Error(result.result ?? 'Chat title generation failed'))
-                    else resolve(result.result ?? '')
-                    proc.stdin.end()
+                /* A line that will not parse is skipped, the same way `handleLine` skips one. Left
+                   unguarded the throw escapes into the stream's 'data' event, where it is an
+                   uncaught exception rather than a rejection — the promise never settles, and the
+                   chat keeps its placeholder title with nothing explaining why. */
+                let event: Record<string, unknown>
+                try {
+                    event = JSON.parse(line) as Record<string, unknown>
+                } catch {
+                    continue
                 }
+
+                if (event.type !== 'result') continue
+
+                settled = true
+                const result = event as unknown as ResultEvent
+                if (result.is_error) reject(new Error(result.result ?? 'Chat title generation failed'))
+                else resolve(result.result ?? '')
+                proc.stdin.end()
             }
         })
 
-        proc.on('error', reject)
+        proc.on('error', (error) => {
+            /* Marked settled so the exit that follows does not replace this with the vaguer
+               'exited early' — a failure to spawn should say so. */
+            settled = true
+            reject(error)
+        })
         proc.on('exit', () => {
             if (!settled) reject(new Error('Chat title process exited early'))
         })
@@ -207,30 +329,42 @@ export function generateChatTitle(prompt: string): Promise<string> {
     })
 }
 
-export function stopClaude(): void {
-    child?.stdin.end()
-    child = null
+/** Ends one chat's process. The conversation is unaffected — the next send resumes it from
+    the session transcript. */
+export function stopSession(sessionId: string): void {
+    const session = sessions.get(sessionId)
+    if (!session) return
+    session.proc.stdin.end()
+    sessions.delete(sessionId)
+    /* Safe even mid-replacement: the CLI read the file at spawn, and `ensureSession` rewrites it
+       before starting the successor. */
+    clearSystemPromptFile(sessionId)
+    setStatus(sessionId, 'idle')
 }
 
-export function getClaudeModel(): string {
-    return currentModel
+export function stopAllSessions(): void {
+    for (const id of [...sessions.keys()]) stopSession(id)
 }
 
-/** Switches the model for the next turn onward. Ends the running process (which flushes
-    its `session_id`) so the next `askClaude` call respawns with `--resume` on the new model. */
-export function setClaudeModel(model: string): void {
-    if (model === currentModel) return
-    currentModel = model
-    stopClaude()
-}
+/** Swaps a running chat onto a new model or effort straight away, rather than waiting for its next
+    send. Model and effort are spawn arguments, so this means replacing the process — it resumes the
+    same session transcript, so the conversation carries over intact. */
+export function restartSession(sessionId: string, model: string, effort: string, systemPrompt?: string): void {
+    const existing = sessions.get(sessionId)
 
-export function getClaudeEffort(): string {
-    return currentEffort
-}
+    /* Nothing running: leave it idle. Spawning here would start a process for a chat the user is
+       only configuring, and the next send picks up the new flags anyway. */
+    if (!existing) return
 
-/** Switches the effort level for the next turn onward, same respawn-on-resume mechanics as setClaudeModel. */
-export function setClaudeEffort(effort: string): void {
-    if (effort === currentEffort) return
-    currentEffort = effort
-    stopClaude()
+    /* Omitted means "only the pickers changed" — keep whatever context the process already has,
+       rather than silently dropping it because this caller had nothing to say about it. */
+    const nextSystemPrompt = systemPrompt ?? existing.systemPrompt
+    if (existing.model === model && existing.effort === effort && existing.systemPrompt === nextSystemPrompt) return
+
+    /* Mid-turn: killing the process now would reject the reply the user is waiting on. Leave it,
+       and let `ensureSession` do the swap on the next send once this turn has landed. */
+    if (existing.queue.length > 0) return
+
+    stopSession(sessionId)
+    ensureSession(sessionId, model, effort, nextSystemPrompt)
 }

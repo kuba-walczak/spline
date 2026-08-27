@@ -6,28 +6,16 @@ import { IconButton } from '@/components/ui/icon-button'
 /* Implementation of `Settings.dc.html` from the Claude app design system,
    scoped down to a single "Prompt" tab per the current spec.
 
-   Each textbox round-trips through Notion the same way Instructions/Context do
+   The textbox round-trips through Notion the same way Instructions/Context do
    elsewhere in the app: draft state, dirty check against the loaded value,
-   explicit sync via the refresh-cw button. Stored as PROJECT.md / CHAT.md /
-   TITLE.md under the Config page (see NotionService.fetch/saveProjectMarkdown,
-   fetch/saveChatMarkdown, fetch/saveTitleMarkdown). */
+   explicit sync via the refresh-cw button. Stored as TITLE.md under the Config
+   page (see NotionService.fetch/saveTitleMarkdown). */
 
 export interface SettingsModalProps {
   onClose: () => void
 }
 
 export function SettingsModal({ onClose }: SettingsModalProps): ReactElement {
-  const [original, setOriginal] = useState('')
-  const [draft, setDraft] = useState('')
-  const [loading, setLoading] = useState(true)
-  const [saving, setSaving] = useState(false)
-  const dirty = draft !== original
-
-  const [chatOriginal, setChatOriginal] = useState('')
-  const [chatDraft, setChatDraft] = useState('')
-  const [chatLoading, setChatLoading] = useState(true)
-  const [chatSaving, setChatSaving] = useState(false)
-  const chatDirty = chatDraft !== chatOriginal
 
   const [titleOriginal, setTitleOriginal] = useState('')
   const [titleDraft, setTitleDraft] = useState('')
@@ -36,24 +24,6 @@ export function SettingsModal({ onClose }: SettingsModalProps): ReactElement {
   const titleDirty = titleDraft !== titleOriginal
 
   useEffect(() => {
-    window.api
-      .getProjectMarkdown()
-      .then((text) => {
-        setOriginal(text)
-        setDraft(text)
-      })
-      .catch((err) => console.error('[settings] getProjectMarkdown failed:', err))
-      .finally(() => setLoading(false))
-
-    window.api
-      .getChatMarkdown()
-      .then((text) => {
-        setChatOriginal(text)
-        setChatDraft(text)
-      })
-      .catch((err) => console.error('[settings] getChatMarkdown failed:', err))
-      .finally(() => setChatLoading(false))
-
     window.api
       .getTitleMarkdown()
       .then((text) => {
@@ -64,31 +34,6 @@ export function SettingsModal({ onClose }: SettingsModalProps): ReactElement {
       .finally(() => setTitleLoading(false))
   }, [])
 
-  async function sync(): Promise<void> {
-    if (saving || !dirty) return
-    setSaving(true)
-    try {
-      await window.api.saveProjectMarkdown(draft)
-      setOriginal(draft)
-    } catch (err) {
-      console.error('[settings] saveProjectMarkdown failed:', err)
-    } finally {
-      setSaving(false)
-    }
-  }
-
-  async function syncChat(): Promise<void> {
-    if (chatSaving || !chatDirty) return
-    setChatSaving(true)
-    try {
-      await window.api.saveChatMarkdown(chatDraft)
-      setChatOriginal(chatDraft)
-    } catch (err) {
-      console.error('[settings] saveChatMarkdown failed:', err)
-    } finally {
-      setChatSaving(false)
-    }
-  }
 
   async function syncTitle(): Promise<void> {
     if (titleSaving || !titleDirty) return
@@ -194,130 +139,6 @@ export function SettingsModal({ onClose }: SettingsModalProps): ReactElement {
           </div>
 
           <div style={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '52px 34px 40px', boxSizing: 'border-box' }}>
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: '16px',
-                marginBottom: '8px',
-                maxWidth: '710px'
-              }}
-            >
-              <h2
-                style={{
-                  margin: 0,
-                  font: 'var(--weight-semibold) var(--text-lg)/1.3 var(--font-sans)',
-                  letterSpacing: 'var(--tracking-tight)',
-                  color: 'var(--text-primary)'
-                }}
-              >
-                Project
-              </h2>
-              {dirty ? (
-                <IconButton
-                  icon="refresh-cw"
-                  label="Sync to Notion"
-                  size="sm"
-                  onClick={() => void sync()}
-                  disabled={saving}
-                />
-              ) : null}
-            </div>
-            <p
-              style={{
-                margin: '0 0 20px',
-                font: 'var(--weight-regular) var(--text-base)/1.45 var(--font-sans)',
-                letterSpacing: 'var(--tracking-tight)',
-                color: 'var(--text-muted)'
-              }}
-            >
-              The prompt sent when attaching a chat to a project.
-            </p>
-            <textarea
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              placeholder={loading ? 'Loading…' : ''}
-              disabled={loading}
-              style={{
-                width: '100%',
-                maxWidth: '710px',
-                minHeight: '160px',
-                boxSizing: 'border-box',
-                padding: '14px 16px',
-                background: 'var(--surface-inset)',
-                border: '1px solid var(--border-default)',
-                borderRadius: 'var(--radius-md)',
-                color: 'var(--text-body)',
-                font: 'var(--weight-regular) var(--text-base)/1.5 var(--font-mono)',
-                resize: 'vertical',
-                outline: 'none',
-                boxShadow: 'none'
-              }}
-            />
-
-            <div
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                justifyContent: 'space-between',
-                gap: '16px',
-                margin: '32px 0 8px',
-                maxWidth: '710px'
-              }}
-            >
-              <h2
-                style={{
-                  margin: 0,
-                  font: 'var(--weight-semibold) var(--text-lg)/1.3 var(--font-sans)',
-                  letterSpacing: 'var(--tracking-tight)',
-                  color: 'var(--text-primary)'
-                }}
-              >
-                Chat
-              </h2>
-              {chatDirty ? (
-                <IconButton
-                  icon="refresh-cw"
-                  label="Sync to Notion"
-                  size="sm"
-                  onClick={() => void syncChat()}
-                  disabled={chatSaving}
-                />
-              ) : null}
-            </div>
-            <p
-              style={{
-                margin: '0 0 20px',
-                font: 'var(--weight-regular) var(--text-base)/1.45 var(--font-sans)',
-                letterSpacing: 'var(--tracking-tight)',
-                color: 'var(--text-muted)'
-              }}
-            >
-              The prompt sent when resuming a chat.
-            </p>
-            <textarea
-              value={chatDraft}
-              onChange={(e) => setChatDraft(e.target.value)}
-              placeholder={chatLoading ? 'Loading…' : ''}
-              disabled={chatLoading}
-              style={{
-                width: '100%',
-                maxWidth: '710px',
-                minHeight: '160px',
-                boxSizing: 'border-box',
-                padding: '14px 16px',
-                background: 'var(--surface-inset)',
-                border: '1px solid var(--border-default)',
-                borderRadius: 'var(--radius-md)',
-                color: 'var(--text-body)',
-                font: 'var(--weight-regular) var(--text-base)/1.5 var(--font-mono)',
-                resize: 'vertical',
-                outline: 'none',
-                boxShadow: 'none'
-              }}
-            />
-
             <div
               style={{
                 display: 'flex',

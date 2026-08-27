@@ -40,15 +40,100 @@ export interface ComposerProps {
   /** When provided, the plus button opens a dropdown of these instead of calling onAdd. */
   projects?: ComposerProject[]
   onSelectProject?: (id: string) => void
-  /** Projects currently linked to this composer (controlled by the parent). */
+  /** Projects currently attached to this chat (controlled by the parent). Attaching and detaching
+      are both live: the context is rebuilt and the CLI process respawned either way. */
   attached?: ComposerProject[]
   onRemoveProject?: (id: string) => void
-  /** Projects already permanently bound to this chat — shown as locked badges, not offered again in the dropdown. */
-  lockedProjects?: ComposerProject[]
+  /** Opens the project's injected context. */
+  onOpenProject?: (id: string) => void
   onDictate?: () => void
   onVoice?: () => void
   className?: string
   style?: CSSProperties
+}
+
+/* The attachment box is the tallest thing in the control row, so the row is pinned to it: without
+   that, detaching the last project drops the row to icon-button height and the whole composer
+   changes size underneath the cursor. */
+const ATTACHMENT_ROW_HEIGHT = 38
+
+interface ProjectChipProps {
+  project: ComposerProject
+  onRemove: () => void
+  onOpen: () => void
+}
+
+/** An attached project. Two targets in one chip: the name detaches the project, the chevron shows
+    what it contributes to the system prompt. Nothing about an attachment is permanent — both
+    directions rebuild the context and respawn the CLI.
+
+    Hover is tracked on the chip rather than on either button so the chevron brightens whenever the
+    chip is under the cursor, which is what advertises that there is something behind it. Declared at
+    module scope because a component defined inside Composer would be a new type on every keystroke,
+    remounting each chip as the draft changes. */
+function ProjectChip({ project, onRemove, onOpen }: ProjectChipProps): ReactElement {
+  const [hovered, setHovered] = useState(false)
+
+  return (
+    <span
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        flex: '0 0 auto',
+        maxWidth: 200,
+        height: 28,
+        background: 'var(--surface-control)',
+        borderRadius: 'var(--radius-md)',
+        overflow: 'hidden'
+      }}
+    >
+      <button
+        type="button"
+        onClick={onRemove}
+        title={`Remove ${project.title}`}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          minWidth: 0,
+          height: '100%',
+          padding: '0 4px 0 10px',
+          background: 'transparent',
+          border: 'none',
+          color: '#E6E5E2',
+          font: 'var(--type-meta)',
+          letterSpacing: 'var(--tracking-tight)',
+          cursor: 'pointer',
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis'
+        }}
+      >
+        {project.title}
+      </button>
+      <button
+        type="button"
+        onClick={onOpen}
+        title={`Show what ${project.title} injects`}
+        aria-label={`Show what ${project.title} injects`}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          flex: '0 0 auto',
+          height: '100%',
+          padding: '0 7px 0 3px',
+          background: 'transparent',
+          border: 'none',
+          color: hovered ? '#E6E5E2' : 'var(--text-faint)',
+          cursor: 'pointer',
+          transition: 'var(--transition-control)'
+        }}
+      >
+        <Icon name="chevron-down" size={12} />
+      </button>
+    </span>
+  )
 }
 
 export function Composer({
@@ -71,7 +156,7 @@ export function Composer({
   onSelectProject,
   attached = [],
   onRemoveProject,
-  lockedProjects = [],
+  onOpenProject,
   onDictate,
   onVoice,
   className,
@@ -146,14 +231,15 @@ export function Composer({
           alignItems: 'center',
           justifyContent: 'space-between',
           gap: 'var(--space-6)',
-          marginTop: 'var(--space-8)'
+          marginTop: 'var(--space-8)',
+          minHeight: `${ATTACHMENT_ROW_HEIGHT}px`
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-4)', flex: '1 1 auto', minWidth: 0 }}>
         <div style={{ position: 'relative', flex: '0 0 auto' }}>
           <IconButton
             icon="plus"
-            label={lockedProjects.length > 0 ? 'Project locked' : 'Add'}
+            label="Add"
             size="md"
             glyphSize={19}
             strokeWidth={2.5}
@@ -184,7 +270,7 @@ export function Composer({
                   zIndex: 41
                 }}
               >
-                {projects.filter((p) => !attached.some((a) => a.id === p.id) && !lockedProjects.some((l) => l.id === p.id)).length === 0 ? (
+                {projects.filter((p) => !attached.some((a) => a.id === p.id)).length === 0 ? (
                   <div
                     style={{
                       padding: '6px 10px',
@@ -197,7 +283,7 @@ export function Composer({
                   </div>
                 ) : (
                   projects
-                    .filter((p) => !attached.some((a) => a.id === p.id) && !lockedProjects.some((l) => l.id === p.id))
+                    .filter((p) => !attached.some((a) => a.id === p.id))
                     .map((p) => (
                     <button
                       key={p.id}
@@ -237,64 +323,39 @@ export function Composer({
             </>
           ) : null}
         </div>
-        {lockedProjects.map((p) => (
-          <span
-            key={p.id}
-            title={`Locked to ${p.title}`}
+        {/* Only drawn when something is attached — an empty bordered box reads as a broken control
+            rather than as an affordance.
+
+            Deliberately not `chatscroll`: that class reserves a stable scrollbar gutter on both
+            edges, which inset the left and right by a further 10px each and left the box looking
+            unevenly padded. Its scrollbar rules size a vertical bar anyway, and this scrolls
+            horizontally. */}
+        {attached.length > 0 ? (
+          <div
             style={{
-              display: 'inline-flex',
+              display: 'flex',
               alignItems: 'center',
-              gap: 6,
-              flex: '0 0 auto',
-              maxWidth: 180,
-              height: 28,
-              padding: '0 10px',
-              background: 'var(--surface-control)',
-              opacity: 0.6,
-              borderRadius: 'var(--radius-md)',
-              color: 'var(--text-faint)',
-              font: 'var(--type-meta)',
-              letterSpacing: 'var(--tracking-tight)',
-              whiteSpace: 'nowrap',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis'
+              gap: 'var(--space-3)',
+              minWidth: 0,
+              height: `${ATTACHMENT_ROW_HEIGHT}px`,
+              boxSizing: 'border-box',
+              padding: '4px',
+              background: '#111111',
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-lg)',
+              overflowX: 'auto'
             }}
           >
-            <Icon name="lock" size={12} />
-            {p.title}
-          </span>
-        ))}
-        {attached.map((p) => (
-          <button
-            key={p.id}
-            type="button"
-            onClick={() => onRemoveProject?.(p.id)}
-            title={`Remove ${p.title}`}
-            style={{
-              display: 'inline-flex',
-              alignItems: 'center',
-              flex: '0 0 auto',
-              maxWidth: 160,
-              height: 28,
-              padding: '0 10px',
-              background: 'var(--surface-control)',
-              border: 'none',
-              borderRadius: 'var(--radius-md)',
-              color: '#E6E5E2',
-              font: 'var(--type-meta)',
-              letterSpacing: 'var(--tracking-tight)',
-              cursor: 'pointer',
-              whiteSpace: 'nowrap',
-              overflow: 'hidden',
-              textOverflow: 'ellipsis',
-              transition: 'var(--transition-control)'
-            }}
-            onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--surface-control-hover)')}
-            onMouseLeave={(e) => (e.currentTarget.style.background = 'var(--surface-control)')}
-          >
-            {p.title}
-          </button>
-        ))}
+            {attached.map((p) => (
+              <ProjectChip
+                key={p.id}
+                project={p}
+                onRemove={() => onRemoveProject?.(p.id)}
+                onOpen={() => onOpenProject?.(p.id)}
+              />
+            ))}
+          </div>
+        ) : null}
         </div>
         <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-5)' }}>
           {models && modelId ? (

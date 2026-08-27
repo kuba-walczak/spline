@@ -4,21 +4,22 @@ import { Composer } from '@/components/ui/composer'
 import { Sidebar } from './Sidebar'
 import { TitleBar } from './TitleBar'
 import { SettingsModal } from './SettingsModal'
+import { ProjectContextModal } from './ProjectContextModal'
 import ProjectDetailView from './ProjectDetailView'
 import { Icon } from '@/components/ui/icon'
+import { buildSystemPrompt } from '@shared/injection'
+import type { SessionStatus } from './Sidebar'
 
 /* Implementation of `Chat Window.dc.html` from the Claude app design system.
-   Conversations live in memory only — the app starts empty and nothing survives quit. */
+
+   Each chat is backed by its own CLI session, identified by a uuid the app mints up front and
+   stores on the chat's Notion row. The CLI writes that session's transcript to disk, and the app
+   reads it back to render history — so continuing a chat is `--resume`, not replaying context
+   into a prompt. Notion holds the index (title, project, session id), never the messages. */
 
 type MessagePart =
   | { kind: 'text'; text: string }
   | { kind: 'tool'; name: string; query: string }
-  /** `persist: false` marks a project re-injected while priming a resumed chat — shown in the UI as a
-      bubble (the context really is being sent to Claude this turn) but not recorded to the Notion
-      transcript's `projects` list, since it's already on record from when the project was first attached. */
-  | { kind: 'context'; label: string; text: string; persist?: boolean }
-  | { kind: 'injection'; label: string; text: string }
-  | { kind: 'transcript'; label: string; text: string }
 
 interface Message {
   id: number
@@ -30,59 +31,51 @@ function textPart(text: string): MessagePart[] {
   return text ? [{ kind: 'text', text }] : []
 }
 
-/** Notion contract: { messages: [{ content, tools: [{ name, query }], projects }] }, alternating from the user. */
-interface StoredMessage {
-  content: string
-  tools: Array<{ name: string; query: string }>
-  /** Titles of the projects injected into this message. */
-  projects: string[]
+/** One part of a message as the session transcript stores it. */
+interface TranscriptPart {
+  kind: 'text' | 'tool'
+  text: string
+  label?: string
 }
 
-function partsToStored(parts: MessagePart[]): StoredMessage {
-  const contextParts = parts.filter(
-    (p): p is { kind: 'context'; label: string; text: string; persist?: boolean } => p.kind === 'context'
-  )
-  return {
-    content: parts
-      .filter((p): p is { kind: 'text'; text: string } => p.kind === 'text')
-      .map((p) => p.text)
-      .join(''),
-    tools: parts
-      .filter((p): p is { kind: 'tool'; name: string; query: string } => p.kind === 'tool')
-      .map((p) => ({ name: p.name, query: p.query })),
-    projects: contextParts.filter((p) => p.persist !== false).map((p) => p.label)
-  }
+function textOf(parts: MessagePart[]): string {
+  return parts
+    .filter((p): p is { kind: 'text'; text: string } => p.kind === 'text')
+    .map((p) => p.text)
+    .join('')
 }
 
-function storedToParts(message: StoredMessage): MessagePart[] {
-  const projects: MessagePart[] = (message.projects ?? []).map((title) => ({ kind: 'context', label: title, text: title }))
-  const tools: MessagePart[] = (message.tools ?? []).map((t) => ({ kind: 'tool', name: t.name, query: t.query }))
-  return projects.concat(tools).concat(textPart(message.content))
-}
-
-/** Flattens a resumed conversation's prior turns to plain text — what gets pasted back to a fresh CLI process
-    that lost the conversation when the app restarted. */
-function messagesToTranscriptText(messages: Message[]): string {
-  return messages
-    .map((m) => ({ role: m.role === 'user' ? 'User' : 'Assistant', content: partsToStored(m.parts).content.trim() }))
-    .filter((m) => m.content.length > 0)
-    .map((m) => `${m.role}: ${m.content}`)
-    .join('\n\n')
+/** Maps the transcript's part shapes onto the ones the bubbles render. What a project contributes
+    never appears here — it lives in the system prompt, and is shown from the composer chip. */
+function transcriptToParts(parts: TranscriptPart[]): MessagePart[] {
+  return parts.map((p) => {
+    if (p.kind === 'tool') return { kind: 'tool' as const, name: p.label || 'tool', query: p.text }
+    return { kind: 'text' as const, text: p.text }
+  })
 }
 
 interface Conversation {
   id: number
   title: string
   messages: Message[]
+  /** The CLI session backing this chat — the id passed to `--resume`. */
+  sessionId: string
+  /** Per-chat model and effort, stored on the chat's Notion row and restored when it reopens. */
+  model: string
+  effort: string
   sourceId?: string
   loaded?: boolean
   /** Titles of every project ever injected into this conversation — drives the sidebar tint and locks
       that project's attach option so it can't be added again. */
   referencedProjectTitles?: string[]
-}
-
-function unionTitles(existing: string[] | undefined, added: string[]): string[] {
-  return Array.from(new Set((existing ?? []).concat(added)))
+  /** Assembled context for every attached project, as last sent to the CLI's system prompt.
+      `undefined` means it has not been assembled yet this run — a reopened chat starts that way and
+      builds it on its next send. Deliberately not persisted: it is a cache of what Notion holds, and
+      rebuilding it is how an edited project reaches an existing chat. */
+  systemPrompt?: string
+  /** The projects' version stamps at the moment `systemPrompt` was assembled, keyed by project id.
+      Compared against fresh stamps on each send to notice a project edited since. */
+  contextVersions?: Record<string, string>
 }
 
 interface Project {
@@ -107,7 +100,8 @@ const EFFORTS = [
   { id: 'extra', name: 'Extra' },
   { id: 'max', name: 'Max' }
 ]
-const DEFAULT_EFFORT_ID = 'medium'
+const DEFAULT_EFFORT_ID = 'high'
+const DEFAULT_MODEL_ID = 'opus'
 
 interface ContentBlock {
   type: string
@@ -151,17 +145,20 @@ export interface ChatWindowProps {
   showSidebar?: boolean
   /** Messages — user bubble treatment. */
   userBubble?: 'Filled' | 'Outlined'
-  /** Messages — reply stream rate, chars/s. */
-  streamSpeed?: number
-  /** Resolve the assistant reply for a sent message. Defaults to the canned deck. */
-  onSend?: (text: string) => Promise<string>
+  /** Resolve the assistant reply for a sent message, on the given chat's CLI session. */
+  onSend?: (
+    sessionId: string,
+    text: string,
+    model: string,
+    effort: string,
+    systemPrompt: string
+  ) => Promise<string>
 }
 
 
 export default function ChatWindow({
   showSidebar = true,
   userBubble = 'Filled',
-  streamSpeed = 22,
   onSend
 }: ChatWindowProps): ReactElement {
   const [conversations, setConversations] = useState<Conversation[]>([])
@@ -175,9 +172,15 @@ export default function ChatWindow({
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(308)
   const [settingsOpen, setSettingsOpen] = useState(false)
+  /** Project whose injected context is open in the modal, by id. */
+  const [contextProjectId, setContextProjectId] = useState<string | null>(null)
   const [draft, setDraft] = useState('')
   const [streamingId, setStreamingId] = useState<number | null>(null)
-  const [modelId, setModelId] = useState('sonnet')
+  /* Model and effort belong to a chat, not the app. These hold the choice for whichever chat is
+     open, and seed the next new one so picking a model carries forward the way a user expects. */
+  /** Process lifecycle per session id, driving each sidebar row's dot. Absent means idle. */
+  const [sessionStatuses, setSessionStatuses] = useState<Record<string, SessionStatus>>({})
+  const [modelId, setModelId] = useState(DEFAULT_MODEL_ID)
   const [effortId, setEffortId] = useState(DEFAULT_EFFORT_ID)
 
   const scrollRef = useRef<HTMLDivElement | null>(null)
@@ -235,15 +238,15 @@ export default function ChatWindow({
   const nextMessageId = useRef(1)
   const nextNotionId = useRef(-1)
   const notionIdBySourceId = useRef(new Map<string, number>())
-  const replyIndex = useRef(0)
   const timer = useRef<ReturnType<typeof setInterval> | null>(null)
-  const streamTarget = useRef<{ conversationId: number; botId: number } | null>(null)
+  const streamTarget = useRef<{ conversationId: number; botId: number; sessionId: string } | null>(null)
   const streamParts = useRef<MessagePart[]>([])
   const conversationsRef = useRef<Conversation[]>([])
   const notionChatsRef = useRef<Conversation[]>([])
   const pendingPageId = useRef(new Map<number, Promise<string>>())
-  /** Notion chat sourceIds whose transcript has already been pasted back to the CLI process this app session. */
-  const primedSourceIds = useRef(new Set<string>())
+  /** Session id per conversation, readable the instant a chat is created — `send` needs it before
+      React has committed the new conversation to state. */
+  const sessionIdByConversation = useRef(new Map<number, string>())
 
   function refreshChatLog(): void {
     window.api
@@ -253,7 +256,7 @@ export default function ChatWindow({
           const bySourceId = new Map(prev.map((c) => [c.sourceId, c]))
           const localSourceIds = new Set(conversationsRef.current.map((c) => c.sourceId).filter(Boolean))
           return entries
-            .filter((entry) => !localSourceIds.has(entry.id))
+            .filter((entry) => Boolean(entry.sessionId) && !localSourceIds.has(entry.id))
             .map((entry) => {
               const existing = bySourceId.get(entry.id)
               let id = notionIdBySourceId.current.get(entry.id)
@@ -261,13 +264,21 @@ export default function ChatWindow({
                 id = nextNotionId.current--
                 notionIdBySourceId.current.set(entry.id, id)
               }
+              if (entry.sessionId) sessionIdByConversation.current.set(id, entry.sessionId)
               return {
                 id,
                 title: entry.name,
                 messages: existing?.messages ?? [],
                 loaded: existing?.loaded,
+                sessionId: entry.sessionId ?? '',
+                model: entry.model ?? DEFAULT_MODEL_ID,
+                effort: entry.effort ?? DEFAULT_EFFORT_ID,
                 sourceId: entry.id,
-                referencedProjectTitles: unionTitles(existing?.referencedProjectTitles, entry.projects)
+                /* Replaces rather than merges: the row is the authoritative set, and a project
+                   detached from the chat has to stay detached. */
+                referencedProjectTitles: entry.projects,
+                systemPrompt: existing?.systemPrompt,
+                contextVersions: existing?.contextVersions
               }
             })
         })
@@ -289,18 +300,43 @@ export default function ChatWindow({
   useEffect(() => {
     refreshChatLog()
     refreshProjects()
-    window.api.getClaudeModel().then(setModelId).catch((error) => console.error('[claude] getClaudeModel failed:', error))
-    window.api.getClaudeEffort().then(setEffortId).catch((error) => console.error('[claude] getClaudeEffort failed:', error))
   }, [])
+
+  /* Model and effort are spawn arguments, so changing either replaces the chat's process straight
+     away — it comes back on `--resume`, so the conversation is untouched and the sidebar dot shows
+     the restart. A chat with no process running stays idle; its next send uses the new flags. */
+  function applyChatSetting(model: string, effort: string): void {
+    if (activeId === null) return
+
+    patch(activeId, (c) => ({ ...c, model, effort }))
+
+    const sessionId = sessionIdByConversation.current.get(activeId)
+    if (sessionId) {
+      void window.api
+        .restartClaudeSession(sessionId, model, effort)
+        .catch((error) => console.error('[claude] restartClaudeSession failed:', error))
+    }
+
+    const conversationId = activeId
+    void ensureSourceId(conversationId)
+      .then((sourceId) => {
+        if (!sourceId) return undefined
+        return Promise.all([
+          window.api.setChatModel(sourceId, model),
+          window.api.setChatEffort(sourceId, effort)
+        ])
+      })
+      .catch((error) => console.error('[chat] saving model/effort failed:', error))
+  }
 
   function selectModel(id: string): void {
     setModelId(id)
-    window.api.setClaudeModel(id).catch((error) => console.error('[claude] setClaudeModel failed:', error))
+    applyChatSetting(id, effortId)
   }
 
   function selectEffort(id: string): void {
     setEffortId(id)
-    window.api.setClaudeEffort(id).catch((error) => console.error('[claude] setClaudeEffort failed:', error))
+    applyChatSetting(modelId, id)
   }
 
   useEffect(() => {
@@ -313,20 +349,22 @@ export default function ChatWindow({
 
   const allConversations = notionChats.concat(conversations)
 
+  /** Resolves stored project titles back to the projects themselves. Titles are what a chat's Notion
+      row records, so a project renamed in Notion drops out here until the chat is re-attached. */
+  function projectsForTitles(titles: string[]): Project[] {
+    const byTitle = new Map(projects.map((p) => [p.title, p]))
+    return titles.map((t) => byTitle.get(t)).filter((p): p is Project => Boolean(p))
+  }
+
   function colorsFor(titles: string[] | undefined): string[] {
     if (!titles || titles.length === 0) return []
     const byTitle = new Map(projects.map((p) => [p.title, p.color]))
     return Array.from(new Set(titles.map((t) => byTitle.get(t)).filter((c): c is string => Boolean(c))))
   }
 
-  /** Projects already referenced by a chat — offered as locked, non-removable badges so they can't be re-attached. */
-  function lockedProjectsFor(titles: string[] | undefined): Project[] {
-    if (!titles || titles.length === 0) return []
-    const byTitle = new Map(projects.map((p) => [p.title, p]))
-    return titles.map((t) => byTitle.get(t)).filter((p): p is Project => Boolean(p))
-  }
   const active = allConversations.find((c) => c.id === activeId) ?? null
   const messages = active ? active.messages : []
+  const contextProject = contextProjectId ? (projects.find((p) => p.id === contextProjectId) ?? null) : null
 
   /** Keeps the newest message vertically centered instead of pinned to the bottom edge, near the
       composer — a spacer after the last message pads the scroll area so centering it (via scrollTop)
@@ -348,10 +386,23 @@ export default function ChatWindow({
   useEffect(() => () => clearTimer(), [])
 
   useEffect(() => {
+    /* Seeded from the main process because the window can open after sessions are already up —
+       otherwise a live chat would sit on a black dot until its next transition. */
+    window.api
+      .getSessionStatuses()
+      .then(setSessionStatuses)
+      .catch((error) => console.error('[claude] getSessionStatuses failed:', error))
+
+    return window.api.onClaudeStatus(({ sessionId, status }) => {
+      setSessionStatuses((prev) => ({ ...prev, [sessionId]: status }))
+    })
+  }, [])
+
+  useEffect(() => {
     if (!window.api.onClaudeEvent) return
-    return window.api.onClaudeEvent((event) => {
+    return window.api.onClaudeEvent(({ sessionId, event }) => {
       const target = streamTarget.current
-      if (!target) return
+      if (!target || target.sessionId !== sessionId) return
       const parts = formatEvent(event)
       if (parts.length > 0) appendParts(target, parts)
     })
@@ -370,7 +421,10 @@ export default function ChatWindow({
     return merged
   }
 
-  function appendParts(target: { conversationId: number; botId: number }, newParts: MessagePart[]): void {
+  function appendParts(
+    target: { conversationId: number; botId: number; sessionId: string },
+    newParts: MessagePart[]
+  ): void {
     streamParts.current = mergeParts(streamParts.current, newParts)
     patch(target.conversationId, (c) => ({
       ...c,
@@ -388,40 +442,43 @@ export default function ChatWindow({
     setNotionChats((prev) => (prev.some((c) => c.id === id) ? prev.map((c) => (c.id === id ? fn(c) : c)) : prev))
   }
 
+  /** Rebuilds a chat's messages from its CLI session transcript. Comes back empty once the CLI has
+      cleaned the session up (`cleanupPeriodDays`), which is the point at which the chat is gone. */
   function loadTranscript(chat: Conversation): void {
-    if (!chat.sourceId || chat.loaded) return
+    if (!chat.sessionId || chat.loaded) return
 
     patch(chat.id, (c) => ({ ...c, loaded: true }))
     window.api
-      .getChatTranscript(chat.sourceId)
+      .readSessionTranscript(chat.sessionId)
       .then((rows) => {
         const loadedMessages = rows.map((row) => ({
           id: nextMessageId.current++,
           role: row.role,
-          parts: storedToParts(row)
+          parts: transcriptToParts(row.parts)
         }))
-        const referenced = rows.flatMap((row) => row.projects ?? [])
-        patch(chat.id, (c) => ({
-          ...c,
-          messages: loadedMessages,
-          referencedProjectTitles: unionTitles(c.referencedProjectTitles, referenced)
-        }))
+        patch(chat.id, (c) => ({ ...c, messages: loadedMessages }))
       })
       .catch((error) => {
-        console.error('[chat] getChatTranscript failed:', error)
+        console.error('[chat] readSessionTranscript failed:', error)
         patch(chat.id, (c) => ({ ...c, loaded: false }))
       })
   }
 
   function createConversation(): number {
     const id = nextConversationId.current++
-    setConversations((prev) => prev.concat({ id, title: UNTITLED, messages: [] }))
+    /* Minted here rather than scraped off the CLI's `init` event, so the chat has an addressable
+       session from the moment it exists and the Notion row is never written without one. */
+    const sessionId = crypto.randomUUID()
+    sessionIdByConversation.current.set(id, sessionId)
+    setConversations((prev) =>
+      prev.concat({ id, title: UNTITLED, messages: [], sessionId, model: modelId, effort: effortId, loaded: true })
+    )
     setActiveId(id)
     setDraft('')
     setRoute('home')
 
     const pagePromise = window.api
-      .createChatPage(UNTITLED)
+      .createChatPage(UNTITLED, sessionId, modelId, effortId)
       .then((pageId) => {
         patch(id, (c) => ({ ...c, sourceId: pageId, loaded: true }))
         return pageId
@@ -433,6 +490,14 @@ export default function ChatWindow({
     pendingPageId.current.set(id, pagePromise)
 
     return id
+  }
+
+  /* The user-facing "new chat" action. Separate from `createConversation` because `send` calls that
+     too, to mint a conversation for a message being sent right now — clearing the chips there would
+     be discarding the very attachments that send is about to use. */
+  function startNewChat(): void {
+    setAttachedProjects([])
+    createConversation()
   }
 
   async function ensureSourceId(conversationId: number): Promise<string | undefined> {
@@ -475,25 +540,112 @@ export default function ChatWindow({
       .finally(() => setCreatingProject(false))
   }
 
+  interface AssembledContext {
+    systemPrompt: string
+    /** Stamps the prompt was built from — what a later send compares against to spot an edit. */
+    versions: Record<string, string>
+  }
+
+  /** Reads the current version stamp of every attached project. Cheap next to assembling the
+      context: it skips the per-context-page fetches that make that expensive. */
+  async function readVersions(attached: Project[]): Promise<Record<string, string>> {
+    const entries = await Promise.all(
+      attached.map(async (p) => [p.id, await window.api.getProjectVersion(p.id)] as const)
+    )
+    return Object.fromEntries(entries)
+  }
+
+  /** Assembles what the CLI's system prompt gets appended for a set of projects. Empty for an empty
+      set, which spawns the process with no extra flags at all.
+
+      The stamps are read after the context, not before: a project edited mid-assembly then leaves a
+      stamp newer than what was actually fetched, and the next send reassembles. Reading them first
+      would record the edit as already included and never pick it up. */
+  async function assembleSystemPrompt(attached: Project[]): Promise<AssembledContext> {
+    if (attached.length === 0) return { systemPrompt: '', versions: {} }
+    try {
+      const contexts = await Promise.all(
+        attached.map(async (p) => ({ title: p.title, text: (await window.api.getProjectContext(p.id)).trim() }))
+      )
+      const versions = await readVersions(attached)
+      return { systemPrompt: buildSystemPrompt(contexts.map((c) => ({ label: c.title, text: c.text }))), versions }
+    } catch (error) {
+      console.error('[chat] project context assembly failed:', error)
+      return { systemPrompt: '', versions: {} }
+    }
+  }
+
+  /** Applies a change to the attached set: rebuilds the context, records it on the chat's Notion row,
+      and respawns the CLI so the new system prompt takes effect now rather than on the next send.
+      Attaching and detaching both come through here — the system prompt is replaced wholesale, so a
+      removal genuinely drops that project's context rather than leaving it behind in the history. */
+  function applyAttachment(next: Project[]): void {
+    setAttachedProjects(next)
+
+    const conversationId = activeId
+    /* Nothing to persist or respawn for a chat that does not exist yet — `send` assembles from the
+       staged set when it creates one. */
+    if (conversationId === null) return
+
+    const titles = next.map((p) => p.title)
+    const sessionId = sessionIdByConversation.current.get(conversationId)
+
+    void (async () => {
+      const { systemPrompt, versions } = await assembleSystemPrompt(next)
+      patch(conversationId, (c) => ({
+        ...c,
+        referencedProjectTitles: titles,
+        systemPrompt,
+        contextVersions: versions
+      }))
+
+      const conv = conversationsRef.current.find((c) => c.id === conversationId)
+      if (sessionId) {
+        await window.api.restartClaudeSession(
+          sessionId,
+          conv?.model ?? modelId,
+          conv?.effort ?? effortId,
+          systemPrompt
+        )
+      }
+
+      try {
+        const sourceId = await ensureSourceId(conversationId)
+        if (sourceId) await window.api.setChatProject(sourceId, titles)
+      } catch (error) {
+        console.error('[chat] setChatProject failed:', error)
+      }
+    })()
+  }
+
   function attachProject(id: string): void {
-    setAttachedProjects((prev) => {
-      if (prev.some((p) => p.id === id)) return prev
-      const project = projects.find((p) => p.id === id)
-      return project ? prev.concat(project) : prev
-    })
+    if (attachedProjects.some((p) => p.id === id)) return
+    const project = projects.find((p) => p.id === id)
+    if (project) applyAttachment(attachedProjects.concat(project))
   }
 
   function removeAttachedProject(id: string): void {
-    setAttachedProjects((prev) => prev.filter((p) => p.id !== id))
+    applyAttachment(attachedProjects.filter((p) => p.id !== id))
   }
 
   function deleteConversation(id: number): void {
     const chat = allConversations.find((c) => c.id === id)
     if (!chat) return
 
+    const sessionId = sessionIdByConversation.current.get(id)
+    if (sessionId) {
+      void window.api.stopClaudeSession(sessionId).catch(() => {})
+      sessionIdByConversation.current.delete(id)
+    }
+
     setConversations((prev) => prev.filter((c) => c.id !== id))
     setNotionChats((prev) => prev.filter((c) => c.id !== id))
-    if (activeId === id) setActiveId(null)
+    if (activeId === id) {
+      setActiveId(null)
+      /* The chips belong to the chat, not to the composer — leaving them behind would attach the
+         deleted chat's projects to whatever is started next. */
+      setAttachedProjects([])
+    }
 
     const archive = async (): Promise<void> => {
       const sourceId = chat.sourceId ?? (await ensureSourceId(id))
@@ -506,26 +658,17 @@ export default function ChatWindow({
   function selectConversation(id: number): void {
     setActiveId(id)
     setRoute('home')
-    const chat = notionChats.find((c) => c.id === id)
-    if (chat) loadTranscript(chat)
-  }
-
-  function stream(conversationId: number, botId: number, full: string): void {
-    let i = 0
-    const speed = Math.max(4, Math.round(streamSpeed))
-    clearTimer()
-    timer.current = setInterval(() => {
-      i = Math.min(full.length, i + 2)
-      const at = i
-      patch(conversationId, (c) => ({
-        ...c,
-        messages: c.messages.map((m) => (m.id === botId ? { ...m, parts: textPart(full.slice(0, at)) } : m))
-      }))
-      if (at >= full.length) {
-        clearTimer()
-        setStreamingId(null)
-      }
-    }, 1000 / speed)
+    /* The pickers follow the chat, so reopening one restores the model and effort it was using. */
+    const chat = allConversations.find((c) => c.id === id)
+    if (chat) {
+      setModelId(chat.model || DEFAULT_MODEL_ID)
+      setEffortId(chat.effort || DEFAULT_EFFORT_ID)
+      /* The chips are the only place an attachment is shown, so they have to follow the chat too —
+         they are its live set, not a staging area for the next message. */
+      setAttachedProjects(projectsForTitles(chat.referencedProjectTitles ?? []))
+    }
+    const notionChat = notionChats.find((c) => c.id === id)
+    if (notionChat) loadTranscript(notionChat)
   }
 
   async function send(): Promise<void> {
@@ -534,79 +677,36 @@ export default function ChatWindow({
 
     const conversationId = activeId ?? createConversation()
     const conv = allConversations.find((c) => c.id === conversationId) ?? null
-    const projectsToInject = attachedProjects
-    const projectTitlesForNotion = unionTitles(conv?.referencedProjectTitles, projectsToInject.map((p) => p.title))
+    const sessionId = sessionIdByConversation.current.get(conversationId)
+    if (!sessionId) {
+      console.error('[chat] no session id for conversation', conversationId)
+      return
+    }
 
-    /* A conversation reloaded from Notion (app restart, or switching back to it) has messages the headless
-       CLI process has never seen — it's a fresh process with no memory of this chat. Prime it once per app
-       session by pasting the transcript back in, alongside every referenced project's instructions. */
-    const priorMessages = conv?.messages ?? []
-    const needsPriming = Boolean(conv?.sourceId) && priorMessages.length > 0 && !primedSourceIds.current.has(conv!.sourceId!)
-    const transcriptText = needsPriming ? messagesToTranscriptText(priorMessages) : ''
-    const resumeProjects = needsPriming
-      ? (conv?.referencedProjectTitles ?? [])
-          .map((title) => projects.find((p) => p.title === title))
-          .filter((p): p is Project => Boolean(p))
-          .filter((p) => !projectsToInject.some((ap) => ap.id === p.id))
-      : []
-    const allProjectsToInject = projectsToInject.concat(resumeProjects)
+    /* The attached set is the whole story now: it is what the system prompt is assembled from, and
+       the system prompt is replaced wholesale at every spawn. Nothing is per-turn any more — a
+       project detached before this send contributes nothing to it. */
+    const projectTitlesForNotion = attachedProjects.map((p) => p.title)
 
-    let userParts: MessagePart[] = textPart(text)
-    let sendText = text
-
-    /* Project guidelines whenever a project is attached (directly or via resume) — every such send, since
-       attaching a project is itself a deliberate per-message action. Chat guidelines only when a fresh
-       headless CLI process is also resuming a conversation it has no memory of — the transcript-priming
-       moment — not on a brand-new chat's first prompt, which has no prior context to accompany. Order,
-       matching the badges: Project guidelines, project(s), Chat guidelines, Chat title. */
-    const hasProjects = allProjectsToInject.length > 0
-    const freshProcess = await window.api.claudeConsumeNeedsGuidelines()
-    const wantsChatGuidelines = freshProcess && needsPriming
-
-    try {
-      const [projectGuidelines, chatGuidelines, contexts] = await Promise.all([
-        hasProjects ? window.api.getProjectMarkdown() : Promise.resolve(''),
-        wantsChatGuidelines ? window.api.getChatMarkdown() : Promise.resolve(''),
-        Promise.all(allProjectsToInject.map(async (p) => ({ title: p.title, text: await window.api.getProjectContext(p.id) })))
-      ])
-      const nonEmpty = contexts.filter((c) => c.text.trim().length > 0)
-      if (nonEmpty.length > 0 || projectGuidelines.trim() || chatGuidelines.trim() || transcriptText) {
-        const projectGuidelinesPart: MessagePart[] = projectGuidelines.trim()
-          ? [{ kind: 'injection', label: 'Project guidelines', text: projectGuidelines.trim() }]
-          : []
-        /* A project already recorded on this conversation (attached earlier, or re-injected only because
-           the headless process needed priming again) still gets a bubble here — the context really is being
-           sent to Claude this turn — but isn't re-recorded to the Notion transcript's `projects` list, since
-           it's already on record from when it was first attached. Claude gets the full context either way,
-           via `blocks` below. */
-        const alreadyReferenced = new Set(conv?.referencedProjectTitles ?? [])
-        const contextParts: MessagePart[] = nonEmpty.map((c) => ({
-          kind: 'context',
-          label: c.title,
-          text: `${c.title}\n\n${c.text.trim()}`,
-          persist: !alreadyReferenced.has(c.title)
-        }))
-        const chatGuidelinesPart: MessagePart[] = chatGuidelines.trim()
-          ? [{ kind: 'injection', label: 'Chat guidelines', text: chatGuidelines.trim() }]
-          : []
-        const transcriptPart: MessagePart[] = transcriptText
-          ? [{ kind: 'transcript', label: conv?.title || UNTITLED, text: transcriptText }]
-          : []
-        const blocks = [
-          projectGuidelines.trim(),
-          ...nonEmpty.map((c) => `${c.title}\n\n${c.text.trim()}`),
-          chatGuidelines.trim(),
-          transcriptText ? `Conversation so far:\n\n${transcriptText}` : ''
-        ].filter(Boolean)
-        sendText = blocks.length > 0 ? blocks.join('\n\n') + '\n\n' + text : text
-        userParts = projectGuidelinesPart
-          .concat(contextParts)
-          .concat(chatGuidelinesPart)
-          .concat(transcriptPart)
-          .concat(textPart(text))
+    const userParts: MessagePart[] = textPart(text)
+    const sendText = text
+    /* Reassemble when the cache is missing (a reopened chat) or when any attached project has been
+       edited since it was built — in Notion, or by another chat that this project has attached. The
+       stamp costs three API calls against the context's three-plus-N, so checking every send is
+       cheaper than being wrong. */
+    let systemPrompt = conv?.systemPrompt ?? ''
+    let contextVersions = conv?.contextVersions
+    if (conv?.systemPrompt === undefined) {
+      ({ systemPrompt, versions: contextVersions } = await assembleSystemPrompt(attachedProjects))
+    } else if (attachedProjects.length > 0) {
+      const fresh = await readVersions(attachedProjects).catch((error) => {
+        console.error('[chat] project version check failed:', error)
+        return null
+      })
+      /* A failed check leaves the cache alone: sending stale context beats dropping it. */
+      if (fresh && attachedProjects.some((p) => fresh[p.id] !== contextVersions?.[p.id])) {
+        ({ systemPrompt, versions: contextVersions } = await assembleSystemPrompt(attachedProjects))
       }
-    } catch (error) {
-      console.error('[chat] getProjectContext failed:', error)
     }
 
     const userMsg: Message = { id: nextMessageId.current++, role: 'user', parts: userParts }
@@ -614,15 +714,17 @@ export default function ChatWindow({
 
     /* Placeholder title from the first line, shown instantly — refined moments later by
        refreshTitle() below once the haiku summary comes back. */
-    const placeholderTitle = conv?.messages.length ? conv.title : titleFrom(text)
+    const priorMessages = conv?.messages ?? []
+    const placeholderTitle = priorMessages.length ? conv!.title : titleFrom(text)
     patch(conversationId, (c) => ({
       ...c,
       title: placeholderTitle,
       messages: c.messages.concat([userMsg, { id: botId, role: 'assistant', parts: [] }]),
-      referencedProjectTitles: unionTitles(c.referencedProjectTitles, projectsToInject.map((p) => p.title))
+      referencedProjectTitles: projectTitlesForNotion,
+      systemPrompt,
+      contextVersions
     }))
     setDraft('')
-    setAttachedProjects([])
     setStreamingId(conversationId)
 
     /* Re-title the chat from every user message it now contains — runs on its own isolated
@@ -635,7 +737,7 @@ export default function ChatWindow({
         if (!instruction) return
         const priorUserTexts = priorMessages
           .filter((m) => m.role === 'user')
-          .map((m) => partsToStored(m.parts).content.trim())
+          .map((m) => textOf(m.parts).trim())
           .filter(Boolean)
         /* Framed as data to summarize, not as requests to fulfill — a bare list of the user's
            questions read as a to-do list and got answered instead of titled. */
@@ -655,38 +757,29 @@ export default function ChatWindow({
     }
     void refreshTitle()
 
-    if (onSend) {
-      streamTarget.current = { conversationId, botId }
-      streamParts.current = []
-      let finalText: string | null = null
-      try {
-        finalText = await onSend(sendText)
-      } catch (error) {
-        appendParts({ conversationId, botId }, textPart(`\nSomething went wrong: ${String(error)}`))
-      } finally {
-        streamTarget.current = null
-        setStreamingId(null)
-      }
+    if (!onSend) return
 
-      const sourceId = await ensureSourceId(conversationId)
-      /* The live process now has this turn in its memory (whether this send primed it or it was already
-         mid-conversation) — no future send in this session needs to re-inject the transcript for it. */
-      if (sourceId) primedSourceIds.current.add(sourceId)
-      if (sourceId && finalText !== null) {
-        try {
-          const assistantParts = streamParts.current.length > 0 ? streamParts.current : textPart(finalText)
-          await window.api.appendMessages(sourceId, [partsToStored(userParts), partsToStored(assistantParts)])
-          if (projectTitlesForNotion.length > 0) await window.api.setChatProject(sourceId, projectTitlesForNotion)
-          await window.api.updateLastActive(sourceId)
-          refreshChatLog()
-        } catch (error) {
-          console.error('[chat] notion sync failed:', error)
-        }
-      }
-    } else {
-      const full = REPLIES[replyIndex.current % REPLIES.length]
-      replyIndex.current++
-      stream(conversationId, botId, full)
+    streamTarget.current = { conversationId, botId, sessionId }
+    streamParts.current = []
+    try {
+      await onSend(sessionId, sendText, conv?.model ?? modelId, conv?.effort ?? effortId, systemPrompt)
+    } catch (error) {
+      appendParts({ conversationId, botId, sessionId }, textPart(`\nSomething went wrong: ${String(error)}`))
+    } finally {
+      streamTarget.current = null
+      setStreamingId(null)
+    }
+
+    /* Notion carries the index only — which project this chat references, and when it was last
+       touched. The messages themselves live in the session transcript. */
+    const sourceId = await ensureSourceId(conversationId)
+    if (!sourceId) return
+    try {
+      if (projectTitlesForNotion.length > 0) await window.api.setChatProject(sourceId, projectTitlesForNotion)
+      await window.api.updateLastActive(sourceId)
+      refreshChatLog()
+    } catch (error) {
+      console.error('[chat] notion sync failed:', error)
     }
   }
 
@@ -737,38 +830,12 @@ export default function ChatWindow({
     overflow: 'hidden'
   }
 
-/** Renders each project-context part (plus the resumed transcript and the global settings prompt, if
-    injected) as its own badge, for use in a standalone bubble. */
-  function renderContextBadges(parts: MessagePart[]): ReactElement[] {
-    return parts
-      .filter(
-        (p): p is { kind: 'injection' | 'context' | 'transcript'; label: string; text: string } =>
-          p.kind === 'injection' || p.kind === 'context' || p.kind === 'transcript'
-      )
-      .map((part, i) => {
-        const icon = part.kind === 'injection' ? 'sliders-horizontal' : part.kind === 'transcript' ? 'message-circle' : 'folder'
-        const alignSelf = part.kind === 'injection' && part.label === 'Project guidelines' ? undefined : 'flex-end'
-        return (
-          <span key={i} title={part.text} style={{ ...toolBadgeStyle, margin: 0, alignSelf }}>
-            <Icon name={icon} size={12} />
-            <strong style={{ fontWeight: 'var(--weight-medium)' }}>{part.label}</strong>
-          </span>
-        )
-      })
-  }
-
-  /** Renders a message's parts. The global injection prompt carries no per-project identity, so it stays silent.
-      Project context is handled separately by renderContextBadges, in its own bubble. */
+  /** Renders a message's parts. */
   function renderParts(parts: MessagePart[]): ReactElement[] {
     const rendered: ReactElement[] = []
     let i = 0
     while (i < parts.length) {
       const part = parts[i]
-
-      if (part.kind === 'injection' || part.kind === 'context' || part.kind === 'transcript') {
-        i++
-        continue
-      }
 
       if (part.kind === 'tool') {
         const toolIcon = part.name === 'WebSearch' ? 'search' : part.name === 'ToolSearch' ? 'wrench' : null
@@ -813,6 +880,13 @@ export default function ChatWindow({
         onOpenSettings={() => setSettingsOpen(true)}
       />
       {settingsOpen ? <SettingsModal onClose={() => setSettingsOpen(false)} /> : null}
+      {contextProject ? (
+        <ProjectContextModal
+          projectId={contextProject.id}
+          title={contextProject.title}
+          onClose={() => setContextProjectId(null)}
+        />
+      ) : null}
 
       <div style={{ display: 'flex', flex: '1 1 auto', minHeight: 0, overflow: 'hidden' }}>
         {showSidebar && !sidebarCollapsed ? (
@@ -832,11 +906,12 @@ export default function ChatWindow({
               conversations={allConversations.map((c) => ({
                 id: c.id,
                 title: c.title,
-                colors: colorsFor(c.referencedProjectTitles)
+                colors: colorsFor(c.referencedProjectTitles),
+                status: sessionStatuses[c.sessionId] ?? 'idle'
               }))}
               activeId={activeId}
               onSelect={selectConversation}
-              onNew={createConversation}
+              onNew={startNewChat}
               onDelete={deleteConversation}
               projects={projects}
               activeProjectId={activeProjectId}
@@ -911,7 +986,11 @@ export default function ChatWindow({
             gap: 'var(--space-4)',
             padding: '24px 28px 0',
             font: 'var(--weight-semibold) var(--text-sm)/1 var(--font-sans)',
-            letterSpacing: 'var(--tracking-tight)'
+            letterSpacing: 'var(--tracking-tight)',
+            /* Messages scroll underneath this bar by design — the fade mask hides them. Being
+               positioned, it also paints over them, so without this it eats hover and clicks on
+               whatever sits at the top of the scroll area. Nothing in here is interactive. */
+            pointerEvents: 'none'
           }}
         >
           <span style={{ color: active ? 'var(--text-primary)' : 'var(--text-faint)' }}>
@@ -942,7 +1021,6 @@ export default function ChatWindow({
               }}
             >
               {messages.map((m, i) => {
-                const contextBadges = renderContextBadges(m.parts)
                 return (
                   <div
                     key={m.id}
@@ -950,23 +1028,10 @@ export default function ChatWindow({
                     style={{
                       display: 'flex',
                       flexDirection: 'column',
-                      gap: contextBadges.length > 0 ? '10px' : '6px',
+                      gap: '6px',
                       alignItems: m.role === 'user' ? 'flex-end' : 'flex-start'
                     }}
                   >
-                    {contextBadges.length > 0 ? (
-                      <div
-                        style={{
-                          display: 'flex',
-                          width: '100%',
-                          justifyContent: m.role === 'user' ? 'flex-end' : 'flex-start'
-                        }}
-                      >
-                        <div style={{ ...botBubbleStyle, display: 'flex', flexDirection: 'column', alignItems: 'flex-start', gap: '9px' }}>
-                          {contextBadges}
-                        </div>
-                      </div>
-                    ) : null}
                     <div
                       style={{
                         display: 'flex',
@@ -1018,7 +1083,7 @@ export default function ChatWindow({
             attached={attachedProjects}
             onSelectProject={attachProject}
             onRemoveProject={removeAttachedProject}
-            lockedProjects={lockedProjectsFor(active?.referencedProjectTitles)}
+            onOpenProject={setContextProjectId}
             style={{ maxWidth: 'var(--container)', minHeight: '104px' }}
           />
         </div>

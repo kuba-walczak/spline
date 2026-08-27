@@ -6,6 +6,8 @@ import type { IconName } from './icon'
 
 export interface NavItemProps {
   icon?: IconName
+  /** Replaces the icon glyph in the leading slot — used for the chats' status dot. */
+  leading?: ReactNode
   label: string
   active?: boolean
   emphasis?: boolean
@@ -18,6 +20,7 @@ export interface NavItemProps {
 
 export function NavItem({
   icon,
+  leading,
   label,
   active = false,
   emphasis,
@@ -91,7 +94,7 @@ export function NavItem({
         ...style
       }}
     >
-      {icon ? glyph : null}
+      {leading ?? (icon ? glyph : null)}
       <span style={{ flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
         {label}
       </span>

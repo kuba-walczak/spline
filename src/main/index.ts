@@ -4,43 +4,44 @@ import { is } from '@electron-toolkit/utils'
 import { disconnectAllDevices, getStreamDeck, setAllDevicesSolidColor, setLedStripSolidColor } from './services/DeviceManager'
 import {
   askClaude,
+  assertClaudeExe,
   claudeEvents,
-  consumeNeedsGuidelines,
   generateChatTitle,
-  getClaudeEffort,
-  getClaudeModel,
-  setClaudeEffort,
-  setClaudeModel,
-  stopClaude
+  getSessionStatuses,
+  restartSession,
+  stopAllSessions,
+  stopSession
 } from './services/ClaudeService'
+import { readSessionTranscript } from './services/SessionTranscript'
 import {
-  appendMessages,
   appendProjectNote,
   archiveChatPage,
   createChatPage,
   createContextPage,
   createProjectPage,
   fetchChatLog,
-  fetchChatMarkdown,
   fetchTitleMarkdown,
-  fetchChatTranscript,
   fetchProjectContext,
+  fetchProjectVersion,
   fetchProjectDetail,
-  fetchProjectMarkdown,
   fetchProjects,
-  saveChatMarkdown,
   saveTitleMarkdown,
-  saveProjectMarkdown,
+  setChatEffort,
+  setChatModel,
   setChatProjects,
+  setChatSessionId,
   updateContextPageContent,
   updateLastActive,
   updatePageTitle,
   updateProjectColor,
   updateProjectInstructions,
-  updateProjectTitle,
-  type ChatMessage
+  updateProjectTitle
 } from './services/NotionService'
 import { startWakeWordListener, stopWakeWordListener } from './services/WakeWordService'
+
+/** Voice runs as its own long-lived chat so spoken turns keep context with each other, and
+    never with whatever chat happens to be open in the window. Fixed so it resumes across runs. */
+const WAKE_WORD_SESSION_ID = '6d1f0c8a-4b7e-4d21-9f3a-2c5e8b0a71d4'
 
 let chatWindow: BrowserWindow | null = null
 
@@ -111,7 +112,7 @@ function startWakeWord(): void {
       try {
         if (text.trim()) {
           console.log(text)
-          const result = await askClaude(text)
+          const result = await askClaude(WAKE_WORD_SESSION_ID, text)
           console.log(result)
         }
       } catch (error) {
@@ -123,12 +124,24 @@ function startWakeWord(): void {
   })
 }
 
-claudeEvents.on('event', (event) => {
-  chatWindow?.webContents.send('claude:event', event)
+claudeEvents.on('event', (payload) => {
+  chatWindow?.webContents.send('claude:event', payload)
+})
+
+claudeEvents.on('status', (payload) => {
+  chatWindow?.webContents.send('claude:status', payload)
 })
 
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null)
+
+  /* Surfaced now rather than on the first send, where a missing binary would look like a chat
+     that simply never answers. */
+  try {
+    assertClaudeExe()
+  } catch (error) {
+    console.error('[main]', error)
+  }
 
   createChatWindow()
   startWakeWord()
@@ -148,7 +161,7 @@ app.on('window-all-closed', () => {
 
 app.on('before-quit', async () => {
   await disconnectAllDevices()
-  stopClaude()
+  stopAllSessions()
   stopWakeWordListener()
 })
 
@@ -185,28 +198,35 @@ ipcMain.handle('streamDeck:setBrightness', async (_event, percentage: number) =>
   await deck?.setBrightness(percentage)
 })
 
-ipcMain.handle('askClaude', async (_event, prompt: string) => {
-  return askClaude(prompt)
+ipcMain.handle(
+  'askClaude',
+  async (_event, sessionId: string, prompt: string, model: string, effort: string, systemPrompt: string) => {
+    return askClaude(sessionId, prompt, model, effort, systemPrompt)
+  }
+)
+
+ipcMain.handle('claude:stopSession', (_event, sessionId: string) => {
+  stopSession(sessionId)
 })
 
-ipcMain.handle('claude:consumeNeedsGuidelines', () => {
-  return consumeNeedsGuidelines()
+ipcMain.handle('claude:getSessionStatuses', () => {
+  return getSessionStatuses()
 })
 
-ipcMain.handle('claude:getModel', () => {
-  return getClaudeModel()
-})
+ipcMain.handle(
+  'claude:restartSession',
+  (_event, sessionId: string, model: string, effort: string, systemPrompt?: string) => {
+    restartSession(sessionId, model, effort, systemPrompt)
+  }
+)
 
-ipcMain.handle('claude:setModel', (_event, model: string) => {
-  setClaudeModel(model)
-})
-
-ipcMain.handle('claude:getEffort', () => {
-  return getClaudeEffort()
-})
-
-ipcMain.handle('claude:setEffort', (_event, effort: string) => {
-  setClaudeEffort(effort)
+ipcMain.handle('claude:readTranscript', (_event, sessionId: string) => {
+  try {
+    return readSessionTranscript(sessionId)
+  } catch (error) {
+    console.error('[main] claude:readTranscript failed:', error)
+    return []
+  }
 })
 
 ipcMain.handle('claude:generateTitle', async (_event, prompt: string) => {
@@ -226,25 +246,27 @@ ipcMain.handle('notion:getChatLog', async () => {
   }
 })
 
-ipcMain.handle('notion:getChatTranscript', async (_event, pageId: string) => {
-  try {
-    return await fetchChatTranscript(pageId)
-  } catch (error) {
-    console.error('[main] notion:getChatTranscript failed:', error)
-    return []
-  }
-})
-
 ipcMain.handle('notion:updateLastActive', async (_event, pageId: string) => {
   await updateLastActive(pageId)
 })
 
-ipcMain.handle('notion:appendMessages', async (_event, pageId: string, messages: ChatMessage[]) => {
-  await appendMessages(pageId, messages)
+ipcMain.handle(
+  'notion:createChatPage',
+  async (_event, name: string, sessionId: string, model: string, effort: string) => {
+    return createChatPage(name, sessionId, model, effort)
+  }
+)
+
+ipcMain.handle('notion:setChatModel', async (_event, pageId: string, model: string) => {
+  await setChatModel(pageId, model)
 })
 
-ipcMain.handle('notion:createChatPage', async (_event, name: string) => {
-  return createChatPage(name)
+ipcMain.handle('notion:setChatEffort', async (_event, pageId: string, effort: string) => {
+  await setChatEffort(pageId, effort)
+})
+
+ipcMain.handle('notion:setChatSessionId', async (_event, pageId: string, sessionId: string) => {
+  await setChatSessionId(pageId, sessionId)
 })
 
 ipcMain.handle('notion:updatePageTitle', async (_event, pageId: string, name: string) => {
@@ -284,6 +306,10 @@ ipcMain.handle('notion:getProjectContext', async (_event, projectId: string) => 
   return fetchProjectContext(projectId)
 })
 
+ipcMain.handle('notion:getProjectVersion', async (_event, projectId: string) => {
+  return fetchProjectVersion(projectId)
+})
+
 ipcMain.handle('notion:appendProjectNote', async (_event, pageId: string, text: string) => {
   await appendProjectNote(pageId, text)
 })
@@ -302,22 +328,6 @@ ipcMain.handle('notion:updateContextPageContent', async (_event, pageId: string,
 
 ipcMain.handle('notion:createContextPage', async (_event, projectId: string, title: string, text: string) => {
   return createContextPage(projectId, title, text)
-})
-
-ipcMain.handle('notion:getProjectMarkdown', async () => {
-  return fetchProjectMarkdown()
-})
-
-ipcMain.handle('notion:saveProjectMarkdown', async (_event, text: string) => {
-  await saveProjectMarkdown(text)
-})
-
-ipcMain.handle('notion:getChatMarkdown', async () => {
-  return fetchChatMarkdown()
-})
-
-ipcMain.handle('notion:saveChatMarkdown', async (_event, text: string) => {
-  await saveChatMarkdown(text)
 })
 
 ipcMain.handle('notion:getTitleMarkdown', async () => {

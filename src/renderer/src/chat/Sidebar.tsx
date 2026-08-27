@@ -13,6 +13,49 @@ export interface SidebarConversation {
   id: number
   title: string
   colors?: string[]
+  /** Lifecycle of this chat's CLI process, shown as the row's leading dot. */
+  status?: SessionStatus
+}
+
+export type SessionStatus = 'idle' | 'booting' | 'ready'
+
+const STATUS_COLORS: Record<SessionStatus, string> = {
+  idle: '#000000',
+  booting: '#e0b341',
+  ready: '#4caf7d'
+}
+
+const STATUS_LABELS: Record<SessionStatus, string> = {
+  idle: 'No process running',
+  booting: 'Starting up',
+  ready: 'Online'
+}
+
+/** Occupies the same 16px leading slot the chat icon used, so rows stay aligned. */
+function StatusDot({ status }: { status: SessionStatus }): ReactElement {
+  return (
+    <span
+      title={STATUS_LABELS[status]}
+      style={{
+        display: 'inline-flex',
+        width: '16px',
+        justifyContent: 'center',
+        alignItems: 'center',
+        flex: '0 0 auto'
+      }}
+    >
+      <span
+        style={{
+          width: '8px',
+          height: '8px',
+          borderRadius: 'var(--radius-full)',
+          background: STATUS_COLORS[status],
+          boxShadow: status === 'idle' ? 'inset 0 0 0 1px var(--border-default)' : 'none',
+          transition: 'var(--transition-control)'
+        }}
+      />
+    </span>
+  )
 }
 
 /** Right-to-left tint: one color fades to transparent, several are spread as stops before the fade. */
@@ -60,7 +103,12 @@ function ChatRow({ conversation, active, onSelect, onDelete }: ChatRowProps): Re
       onMouseEnter={() => setHover(true)}
       onMouseLeave={() => setHover(false)}
     >
-      <NavItem icon="message-circle" label={conversation.title} active={active} onClick={onSelect} />
+      <NavItem
+        leading={<StatusDot status={conversation.status ?? 'idle'} />}
+        label={conversation.title}
+        active={active}
+        onClick={onSelect}
+      />
       {conversation.colors && conversation.colors.length > 0 ? (
         <div
           style={{

@@ -1,18 +1,19 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
 
-interface ChatToolCall {
-  name: string
-  query: string
+/** One part of a message as the CLI's session transcript stores it. */
+interface TranscriptPart {
+  kind: 'text' | 'tool'
+  text: string
+  label?: string
 }
 
-/** Stored shape — role is positional: messages alternate, starting with the user. */
-interface ChatMessage {
-  content: string
-  tools: ChatToolCall[]
-  projects: string[]
-}
+/** `idle` — no process. `booting` — spawned, nothing heard back yet. `ready` — the CLI has spoken. */
+type SessionStatus = 'idle' | 'booting' | 'ready'
 
-type ChatTranscriptMessage = ChatMessage & { role: 'user' | 'assistant' }
+interface TranscriptMessage {
+  role: 'user' | 'assistant'
+  parts: TranscriptPart[]
+}
 
 declare global {
   interface Window {
@@ -21,22 +22,46 @@ declare global {
       setIgnoreMouseEvents: (ignore: boolean) => void
       setRgbColor: (r: number, g: number, b: number) => Promise<void>
       setLedStripColor: (r: number, g: number, b: number) => Promise<void>
-      askClaude: (prompt: string) => Promise<string>
-      claudeConsumeNeedsGuidelines: () => Promise<boolean>
-      getClaudeModel: () => Promise<string>
-      setClaudeModel: (model: string) => Promise<void>
-      getClaudeEffort: () => Promise<string>
-      setClaudeEffort: (effort: string) => Promise<void>
+      askClaude: (
+        sessionId: string,
+        prompt: string,
+        model: string,
+        effort: string,
+        systemPrompt: string
+      ) => Promise<string>
+      stopClaudeSession: (sessionId: string) => Promise<void>
+      restartClaudeSession: (
+        sessionId: string,
+        model: string,
+        effort: string,
+        systemPrompt?: string
+      ) => Promise<void>
+      getSessionStatuses: () => Promise<Record<string, SessionStatus>>
+      onClaudeStatus: (
+        callback: (payload: { sessionId: string; status: SessionStatus }) => void
+      ) => () => void
+      readSessionTranscript: (sessionId: string) => Promise<TranscriptMessage[]>
       generateChatTitle: (prompt: string) => Promise<string>
-      onClaudeEvent: (callback: (event: Record<string, unknown>) => void) => () => void
+      onClaudeEvent: (
+        callback: (payload: { sessionId: string; event: Record<string, unknown> }) => void
+      ) => () => void
       openChatWindow: () => Promise<void>
       getChatLog: () => Promise<
-        Array<{ id: string; name: string; lastActive: string | null; projects: string[] }>
+        Array<{
+          id: string
+          name: string
+          lastActive: string | null
+          projects: string[]
+          sessionId: string | null
+          model: string | null
+          effort: string | null
+        }>
       >
-      getChatTranscript: (pageId: string) => Promise<ChatTranscriptMessage[]>
       updateLastActive: (pageId: string) => Promise<void>
-      appendMessages: (pageId: string, messages: ChatMessage[]) => Promise<void>
-      createChatPage: (name: string) => Promise<string>
+      createChatPage: (name: string, sessionId: string, model: string, effort: string) => Promise<string>
+      setChatModel: (pageId: string, model: string) => Promise<void>
+      setChatEffort: (pageId: string, effort: string) => Promise<void>
+      setChatSessionId: (pageId: string, sessionId: string) => Promise<void>
       updatePageTitle: (pageId: string, name: string) => Promise<void>
       setChatProject: (pageId: string, projectTitles: string[]) => Promise<void>
       archiveChatPage: (pageId: string) => Promise<void>
@@ -52,18 +77,16 @@ declare global {
         instructions: string
         color: string | null
         blocks: Array<{ id: string; type: string; text: string; checked?: boolean; url?: string }>
-        chats: Array<{ id: string; name: string }>
+        chats: Array<{ id: string; name: string; sessionId: string | null }>
       }>
       getProjectContext: (projectId: string) => Promise<string>
+      /** Stamp that moves whenever anything the project contributes to the system prompt changes. */
+      getProjectVersion: (projectId: string) => Promise<string>
       appendProjectNote: (pageId: string, text: string) => Promise<void>
       updateProjectInstructions: (projectId: string, text: string) => Promise<void>
       updateProjectColor: (projectId: string, color: string) => Promise<void>
       updateContextPageContent: (pageId: string, text: string) => Promise<void>
       createContextPage: (projectId: string, title: string, text: string) => Promise<string>
-      getProjectMarkdown: () => Promise<string>
-      saveProjectMarkdown: (text: string) => Promise<void>
-      getChatMarkdown: () => Promise<string>
-      saveChatMarkdown: (text: string) => Promise<void>
       getTitleMarkdown: () => Promise<string>
       saveTitleMarkdown: (text: string) => Promise<void>
     }

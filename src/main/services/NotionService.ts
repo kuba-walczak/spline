@@ -1,4 +1,6 @@
 import 'dotenv/config'
+import { readSessionTranscript } from './SessionTranscript'
+import { CONTEXT_SEPARATOR } from '../../shared/injection'
 
 const NOTION_VERSION = '2025-09-03'
 const CHAT_LOG_DATA_SOURCE_ID = 'efe919c7-c9c1-404e-ac41-2b5210790815'
@@ -29,10 +31,77 @@ export interface ChatLogEntry {
     name: string
     lastActive: string | null
     projects: string[]
+    /** The CLI session id whose transcript holds this chat. Null only for rows written before
+        the app moved to session-backed chats — those have no recoverable history. */
+    sessionId: string | null
+    /** Per-chat model and effort. Null falls back to the app defaults. */
+    model: string | null
+    effort: string | null
+    /** The row's own last edit. Moves on a rename or a project change as well as on a message,
+        where `lastActive` only tracks the last message — which is why the staleness check reads
+        this one and the sidebar reads that one. */
+    lastEdited: string | null
+}
+
+/** Reads a property that may be stored as either a select or a text field, so the Chat Log's
+    columns work however they were set up in Notion. */
+function scalarProperty(page: NotionPage, name: string): string | null {
+    const prop = page.properties[name] as
+        | { select?: { name: string } | null; rich_text?: NotionRichText[]; title?: NotionRichText[] }
+        | undefined
+    const value = prop?.select?.name ?? plainText(prop?.rich_text ?? prop?.title)
+    return value?.trim() ? value.trim() : null
+}
+
+/** Notion rejects a value shaped for the wrong property type, so the payload is built from the
+    data source's own schema rather than assumed. Fetched once and cached. */
+let propertyTypes: Record<string, string> | null = null
+
+async function fetchPropertyTypes(): Promise<Record<string, string>> {
+    if (propertyTypes) return propertyTypes
+
+    const res = await fetch(`https://api.notion.com/v1/data_sources/${CHAT_LOG_DATA_SOURCE_ID}`, {
+        headers: headers()
+    })
+    if (!res.ok) throw new Error(`Notion data source fetch failed: ${res.status} ${await res.text()}`)
+
+    const data = (await res.json()) as { properties?: Record<string, { type?: string }> }
+    propertyTypes = Object.fromEntries(
+        Object.entries(data.properties ?? {}).map(([key, value]) => [key, value.type ?? 'rich_text'])
+    )
+    return propertyTypes
+}
+
+async function scalarPayload(name: string, value: string): Promise<Record<string, unknown>> {
+    const type = (await fetchPropertyTypes())[name]
+    if (type === 'select') return { select: { name: value } }
+    if (type === 'multi_select') return { multi_select: [{ name: value }] }
+    return { rich_text: [{ type: 'text', text: { content: value } }] }
+}
+
+/** Stores the model chosen for one chat, so reopening it restores that choice. */
+export async function setChatModel(pageId: string, model: string): Promise<void> {
+    await patchPage(pageId, { Model: await scalarPayload('Model', model) }, 'model')
+}
+
+/** Stores the effort level chosen for one chat. */
+export async function setChatEffort(pageId: string, effort: string): Promise<void> {
+    await patchPage(pageId, { Effort: await scalarPayload('Effort', effort) }, 'effort')
+}
+
+async function patchPage(pageId: string, properties: Record<string, unknown>, label: string): Promise<void> {
+    const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+        method: 'PATCH',
+        headers: headers(),
+        body: JSON.stringify({ properties })
+    })
+
+    if (!res.ok) throw new Error(`Notion chat ${label} update failed: ${res.status} ${await res.text()}`)
 }
 
 interface NotionPage {
     id: string
+    last_edited_time?: string
     properties: Record<string, unknown>
 }
 
@@ -63,38 +132,24 @@ export async function fetchChatLog(): Promise<ChatLogEntry[]> {
             id: page.id,
             name: plainText(nameProp?.title),
             lastActive: lastActiveProp?.date?.start ?? null,
-            projects
+            projects,
+            sessionId: scalarProperty(page, 'Session ID'),
+            model: scalarProperty(page, 'Model'),
+            effort: scalarProperty(page, 'Effort'),
+            lastEdited: page.last_edited_time ?? null
         }
     })
 }
 
-export interface ChatToolCall {
-    name: string
-    query: string
-}
-
-/** Stored shape — role is positional: messages alternate, starting with the user. */
-export interface ChatMessage {
-    content: string
-    tools: ChatToolCall[]
-    /** Titles of the projects injected into this message. */
-    projects: string[]
-}
-
-export type ChatTranscriptMessage = ChatMessage & { role: 'user' | 'assistant' }
-
-function roleAt(index: number): 'user' | 'assistant' {
-    return index % 2 === 0 ? 'user' : 'assistant'
-}
-
-/** Page body contract: a single `json` code block holding this object. */
-interface ChatTranscriptDocument {
-    messages: ChatMessage[]
+/** Records which CLI session backs a chat — the id the app passes to `--resume` to continue it. */
+export async function setChatSessionId(pageId: string, sessionId: string): Promise<void> {
+    await patchPage(pageId, { 'Session ID': await scalarPayload('Session ID', sessionId) }, 'session id')
 }
 
 interface NotionBlock {
     id: string
     type: string
+    last_edited_time?: string
     heading_1?: { rich_text: NotionRichText[] }
     heading_2?: { rich_text: NotionRichText[] }
     heading_3?: { rich_text: NotionRichText[] }
@@ -135,45 +190,7 @@ function toRichText(text: string): Array<{ type: 'text'; text: { content: string
     return chunks.map((content) => ({ type: 'text', text: { content } }))
 }
 
-function codeBlockBody(messages: ChatMessage[]): Record<string, unknown> {
-    const document: ChatTranscriptDocument = {
-        messages: messages.map((m) => ({ content: m.content, tools: m.tools, projects: m.projects }))
-    }
-    return {
-        object: 'block',
-        type: 'code',
-        code: { language: 'json', rich_text: toRichText(JSON.stringify(document, null, 2)) }
-    }
-}
-
-/** Rewrites the transcript code block with the existing messages plus the new ones. */
-export async function appendMessages(pageId: string, messages: ChatMessage[]): Promise<void> {
-    if (messages.length === 0) return
-
-    const blocks = await fetchBlockChildren(pageId)
-    const existing = parseTranscriptBlocks(blocks)
-    const body = codeBlockBody(existing.concat(messages))
-
-    const codeBlock = blocks.find((b) => b.type === 'code')
-    if (codeBlock) {
-        const res = await fetch(`https://api.notion.com/v1/blocks/${codeBlock.id}`, {
-            method: 'PATCH',
-            headers: headers(),
-            body: JSON.stringify({ code: body.code })
-        })
-        if (!res.ok) throw new Error(`Notion transcript update failed: ${res.status} ${await res.text()}`)
-        return
-    }
-
-    const res = await fetch(`https://api.notion.com/v1/blocks/${pageId}/children`, {
-        method: 'PATCH',
-        headers: headers(),
-        body: JSON.stringify({ children: [body] })
-    })
-    if (!res.ok) throw new Error(`Notion append blocks failed: ${res.status} ${await res.text()}`)
-}
-
-/** Sets the Chat Log's "Project" multi-select property — each name must match an existing project title. */
+ /** Sets the Chat Log's "Project" multi-select property — each name must match an existing project title. */
 export async function setChatProjects(pageId: string, projectTitles: string[]): Promise<void> {
     const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
         method: 'PATCH',
@@ -186,7 +203,12 @@ export async function setChatProjects(pageId: string, projectTitles: string[]): 
     if (!res.ok) throw new Error(`Notion chat project update failed: ${res.status} ${await res.text()}`)
 }
 
-export async function createChatPage(name: string): Promise<string> {
+export async function createChatPage(
+    name: string,
+    sessionId: string,
+    model: string,
+    effort: string
+): Promise<string> {
     const res = await fetch('https://api.notion.com/v1/pages', {
         method: 'POST',
         headers: headers(),
@@ -194,7 +216,10 @@ export async function createChatPage(name: string): Promise<string> {
             parent: { type: 'data_source_id', data_source_id: CHAT_LOG_DATA_SOURCE_ID },
             properties: {
                 Name: { title: [{ type: 'text', text: { content: name } }] },
-                'Last active': { date: { start: new Date().toISOString() } }
+                'Last active': { date: { start: new Date().toISOString() } },
+                'Session ID': await scalarPayload('Session ID', sessionId),
+                Model: await scalarPayload('Model', model),
+                Effort: await scalarPayload('Effort', effort)
             }
         })
     })
@@ -240,77 +265,6 @@ export async function updateLastActive(pageId: string): Promise<void> {
     if (!res.ok) throw new Error(`Notion page update failed: ${res.status} ${await res.text()}`)
 }
 
-function normalizeMessage(raw: unknown): ChatMessage | null {
-    if (typeof raw !== 'object' || raw === null) return null
-    const m = raw as Record<string, unknown>
-    const tools = Array.isArray(m.tools)
-        ? m.tools
-              .filter((t): t is Record<string, unknown> => typeof t === 'object' && t !== null)
-              .map((t) => ({ name: String(t.name ?? 'tool'), query: String(t.query ?? '') }))
-        : []
-
-    const projects = Array.isArray(m.projects) ? m.projects.filter((p): p is string => typeof p === 'string') : []
-
-    return { content: String(m.content ?? ''), tools, projects }
-}
-
-/**
- * Legacy body: a sequence of Heading-3 blocks each followed by the message's
- * text blocks, broken by "## Run N" headings and dividers. Speakers alternate
- * starting with the user, so the heading label itself is ignored.
- */
-function parseLegacyBlocks(blocks: NotionBlock[]): ChatMessage[] {
-    const messages: ChatMessage[] = []
-    let current: ChatMessage | null = null
-
-    for (const block of blocks) {
-        if (block.type === 'heading_3') {
-            if (current) messages.push(current)
-            current = { content: '', tools: [], projects: [] }
-            continue
-        }
-
-        if (block.type === 'heading_2' || block.type === 'divider' || block.type === 'quote') {
-            if (current) messages.push(current)
-            current = null
-            continue
-        }
-
-        if (!current) continue
-
-        const text = block.type === 'code' ? plainText(block.code?.rich_text) : plainText(block.paragraph?.rich_text)
-        if (text) current.content = current.content ? `${current.content}\n${text}` : text
-    }
-
-    if (current) messages.push(current)
-
-    return messages
-}
-
-/** Reads the `json` transcript code block, falling back to the legacy heading layout. */
-function parseTranscriptBlocks(blocks: NotionBlock[]): ChatMessage[] {
-    const codeBlock = blocks.find((b) => b.type === 'code')
-
-    if (codeBlock) {
-        try {
-            const parsed = JSON.parse(plainText(codeBlock.code?.rich_text)) as ChatTranscriptDocument
-            if (Array.isArray(parsed?.messages)) {
-                return parsed.messages.map(normalizeMessage).filter((m): m is ChatMessage => m !== null)
-            }
-        } catch {
-            // Not the transcript block — fall through to the legacy layout.
-        }
-    }
-
-    return parseLegacyBlocks(blocks)
-}
-
-/** Roles are positional: messages alternate, starting with the user. */
-export async function fetchChatTranscript(pageId: string): Promise<ChatTranscriptMessage[]> {
-    const messages = parseTranscriptBlocks(await fetchBlockChildren(pageId))
-    return messages.map((m, i) => ({ ...m, role: roleAt(i) }))
-}
-
 export interface ProjectEntry {
     id: string
     title: string
@@ -330,11 +284,19 @@ function firstPreview(blocks: NotionBlock[]): string {
 
 const HEX_COLOR = /^#[0-9a-fA-F]{3}([0-9a-fA-F]{3})?$/
 
-async function fetchPageLastEdited(pageId: string): Promise<string | null> {
+interface NotionPageObject {
+    last_edited_time?: string
+    properties?: Record<string, unknown>
+}
+
+async function fetchPage(pageId: string): Promise<NotionPageObject> {
     const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, { headers: headers() })
     if (!res.ok) throw new Error(`Notion page fetch failed: ${res.status} ${await res.text()}`)
-    const data = (await res.json()) as { last_edited_time?: string }
-    return data.last_edited_time ?? null
+    return (await res.json()) as NotionPageObject
+}
+
+async function fetchPageLastEdited(pageId: string): Promise<string | null> {
+    return (await fetchPage(pageId)).last_edited_time ?? null
 }
 
 /** Every child page under the Projects page — one card per sub-page. */
@@ -454,6 +416,8 @@ function toDetailBlock(block: NotionBlock): ProjectDetailBlock | null {
 export interface ProjectChatEntry {
     id: string
     name: string
+    sessionId: string | null
+    lastEdited: string | null
 }
 
 export interface ProjectDetail {
@@ -602,7 +566,9 @@ export async function fetchProjectDetail(pageId: string): Promise<ProjectDetail>
     const title = plainText(titleProp?.title)
 
     const chatLog = await fetchChatLog()
-    const chats = chatLog.filter((c) => c.projects.includes(title)).map((c) => ({ id: c.id, name: c.name }))
+    const chats = chatLog
+        .filter((c) => c.projects.includes(title))
+        .map((c) => ({ id: c.id, name: c.name, sessionId: c.sessionId, lastEdited: c.lastEdited }))
 
     return {
         id: pageId,
@@ -615,12 +581,53 @@ export async function fetchProjectDetail(pageId: string): Promise<ProjectDetail>
     }
 }
 
-/** Flattens a chat transcript to plain text, alternating "User:"/"Assistant:" lines. */
-function transcriptToText(messages: ChatTranscriptMessage[]): string {
-    return messages
-        .filter((m) => m.content.trim().length > 0)
-        .map((m) => `${m.role === 'user' ? 'User' : 'Assistant'}: ${m.content.trim()}`)
+/** Flattens a chat's session transcript to plain text, alternating "User:"/"Assistant:" lines.
+    Injected context is dropped — a project quoting its own instructions back at itself is noise. */
+function chatToText(sessionId: string): string {
+    return readSessionTranscript(sessionId)
+        .map((m) => ({
+            role: m.role === 'user' ? 'User' : 'Assistant',
+            text: m.parts
+                .filter((p) => p.kind === 'text')
+                .map((p) => p.text.trim())
+                .join('\n')
+                .trim()
+        }))
+        .filter((m) => m.text.length > 0)
+        .map((m) => `${m.role}: ${m.text}`)
         .join('\n')
+}
+
+/** A stamp that changes whenever anything a project contributes to the system prompt changes.
+
+    Notion's `last_edited_time` does not propagate upward — editing a child page leaves the parent's
+    timestamp untouched — so the parent's own stamp is not enough on its own. Taking the maximum
+    across the parent, every child page and every attached chat covers all three, and costs the
+    three calls `fetchProjectDetail` already makes rather than the per-page content fetches that
+    make `fetchProjectContext` expensive.
+
+    An attached chat's transcript lives in the CLI's JSONL rather than in Notion, but it only ever
+    grows when the app sends a message, and sending stamps the chat's row — so the row stands in for
+    the transcript. */
+export async function fetchProjectVersion(projectId: string): Promise<string> {
+    const [page, blocks, chatLog] = await Promise.all([
+        fetchPage(projectId),
+        fetchBlockChildren(projectId),
+        fetchChatLog()
+    ])
+
+    /* Chats record the project by title, not by id, so resolving the title is unavoidable here. */
+    const title = plainText((page.properties?.title as { title?: NotionRichText[] } | undefined)?.title)
+
+    const stamps = [
+        page.last_edited_time ?? null,
+        ...blocks.filter((b) => b.type === 'child_page').map((b) => b.last_edited_time ?? null),
+        ...chatLog.filter((c) => c.projects.includes(title)).map((c) => c.lastEdited)
+    ].filter((t): t is string => Boolean(t))
+
+    /* ISO-8601 UTC sorts correctly as a string, so no date parsing is needed. Empty for a project
+       with nothing in it at all, which simply never looks stale. */
+    return stamps.length === 0 ? '' : stamps.reduce((max, t) => (t > max ? t : max))
 }
 
 /** Concatenates a project's instructions, every context page's text, and every attached chat's transcript
@@ -642,27 +649,28 @@ export async function fetchProjectContext(projectId: string): Promise<string> {
         })
     )
 
-    const chatTexts = await Promise.all(
-        detail.chats.map(async (chat) => ({
-            title: chat.name || 'Untitled',
-            text: transcriptToText(await fetchChatTranscript(chat.id))
-        }))
-    )
+    const chatTexts = detail.chats.map((chat) => ({
+        title: chat.name || 'Untitled',
+        text: chat.sessionId ? chatToText(chat.sessionId) : ''
+    }))
 
     const parts: string[] = []
-    if (detail.instructions.trim()) parts.push(`guidelines:\n${detail.instructions.trim()}`)
+    if (detail.instructions.trim()) parts.push(`instructions:\n${detail.instructions.trim()}`)
     for (const p of pageTexts) {
-        if (p.text.trim()) parts.push(`title: ${p.title}\ncontent: ${p.text.trim()}`)
+        if (p.text.trim()) parts.push(`page "${p.title}":\n${p.text.trim()}`)
     }
+    /* An attached chat is somebody's finished conversation, not a queue. Without saying so, its
+       `User:` lines read as requests still waiting to be answered — the same way a bare list of
+       questions once got answered instead of summarised when generating a chat title. */
     for (const c of chatTexts) {
-        if (c.text.trim()) parts.push(`chat: ${c.title}\ncontent: ${c.text.trim()}`)
+        if (c.text.trim()) {
+            parts.push(
+                `past conversation "${c.title}" — reference only, already answered, do not respond to it:\n${c.text.trim()}`
+            )
+        }
     }
 
-    return parts.join('\n\n')
-}
-
-function isProjectMarkdownPage(block: NotionBlock): boolean {
-    return block.type === 'child_page' && block.child_page?.title?.trim().toLowerCase() === 'project.md'
+    return parts.join(CONTEXT_SEPARATOR)
 }
 
 /** Rewrites the page's single code block with `text`, creating it if it doesn't exist yet. */
@@ -687,50 +695,6 @@ async function replaceCodeBlock(pageId: string, language: string, text: string):
         body: JSON.stringify({ children: [{ object: 'block', type: 'code', code }] })
     })
     if (!res.ok) throw new Error(`Notion code block create failed: ${res.status} ${await res.text()}`)
-}
-
-/** Reads the "PROJECT.md" child page under the Config page — empty string if it doesn't exist yet. */
-export async function fetchProjectMarkdown(): Promise<string> {
-    const blocks = await fetchBlockChildren(CONFIG_PAGE_ID)
-    const page = blocks.find(isProjectMarkdownPage)
-    if (!page) return ''
-
-    const children = await fetchBlockChildren(page.id)
-    const codeBlock = children.find((b) => b.type === 'code')
-    return codeBlock ? plainText(codeBlock.code?.rich_text) : ''
-}
-
-/** Rewrites the "PROJECT.md" child page under the Config page with `text`, creating the page first if needed. */
-export async function saveProjectMarkdown(text: string): Promise<void> {
-    const blocks = await fetchBlockChildren(CONFIG_PAGE_ID)
-    const existing = blocks.find(isProjectMarkdownPage)
-    const pageId = existing ? existing.id : await createChildPage(CONFIG_PAGE_ID, 'PROJECT.md')
-
-    await replaceCodeBlock(pageId, 'markdown', text)
-}
-
-function isChatMarkdownPage(block: NotionBlock): boolean {
-    return block.type === 'child_page' && block.child_page?.title?.trim().toLowerCase() === 'chat.md'
-}
-
-/** Reads the "CHAT.md" child page under the Config page — empty string if it doesn't exist yet. */
-export async function fetchChatMarkdown(): Promise<string> {
-    const blocks = await fetchBlockChildren(CONFIG_PAGE_ID)
-    const page = blocks.find(isChatMarkdownPage)
-    if (!page) return ''
-
-    const children = await fetchBlockChildren(page.id)
-    const codeBlock = children.find((b) => b.type === 'code')
-    return codeBlock ? plainText(codeBlock.code?.rich_text) : ''
-}
-
-/** Rewrites the "CHAT.md" child page under the Config page with `text`, creating the page first if needed. */
-export async function saveChatMarkdown(text: string): Promise<void> {
-    const blocks = await fetchBlockChildren(CONFIG_PAGE_ID)
-    const existing = blocks.find(isChatMarkdownPage)
-    const pageId = existing ? existing.id : await createChildPage(CONFIG_PAGE_ID, 'CHAT.md')
-
-    await replaceCodeBlock(pageId, 'markdown', text)
 }
 
 function isTitleMarkdownPage(block: NotionBlock): boolean {
