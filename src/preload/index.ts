@@ -1,5 +1,7 @@
 import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
+import type { AppConfig } from '../shared/config'
+import type { Skill, SkillData } from '../shared/skills'
 
 const api = {
   setIgnoreMouseEvents: (ignore: boolean) => ipcRenderer.send('setIgnoreMouseEvents', ignore),
@@ -28,6 +30,8 @@ const api = {
     ipcRenderer.on('claude:status', listener)
     return () => ipcRenderer.removeListener('claude:status', listener)
   },
+  readSessionContextTokens: (sessionId: string) =>
+    ipcRenderer.invoke('claude:readContextTokens', sessionId) as Promise<number | null>,
   readSessionTranscript: (sessionId: string) =>
     ipcRenderer.invoke('claude:readTranscript', sessionId) as Promise<
       Array<{
@@ -49,6 +53,14 @@ const api = {
     ipcRenderer.on('claude:event', listener)
     return () => ipcRenderer.removeListener('claude:event', listener)
   },
+  onClaudeDebug: (callback: (payload: { sessionId: string; line: string }) => void) => {
+    const listener = (
+      _event: Electron.IpcRendererEvent,
+      data: { sessionId: string; line: string }
+    ): void => callback(data)
+    ipcRenderer.on('claude:debug', listener)
+    return () => ipcRenderer.removeListener('claude:debug', listener)
+  },
   openChatWindow: () => ipcRenderer.invoke('chat:open') as Promise<void>,
   getChatLog: () =>
     ipcRenderer.invoke('notion:getChatLog') as Promise<
@@ -56,7 +68,7 @@ const api = {
         id: string
         name: string
         lastActive: string | null
-        projects: string[]
+        projectRefs: string[]
         sessionId: string | null
         model: string | null
         effort: string | null
@@ -73,14 +85,17 @@ const api = {
     ipcRenderer.invoke('notion:setChatSessionId', pageId, sessionId) as Promise<void>,
   updatePageTitle: (pageId: string, name: string) =>
     ipcRenderer.invoke('notion:updatePageTitle', pageId, name) as Promise<void>,
-  setChatProject: (pageId: string, projectTitles: string[]) =>
-    ipcRenderer.invoke('notion:setChatProject', pageId, projectTitles) as Promise<void>,
+  setChatProject: (pageId: string, projectIds: string[]) =>
+    ipcRenderer.invoke('notion:setChatProject', pageId, projectIds) as Promise<void>,
+  migrateChatProjectRefs: (projects: Array<{ id: string; title: string }>) =>
+    ipcRenderer.invoke('notion:migrateChatProjectRefs', projects) as Promise<number>,
   archiveChatPage: (pageId: string) => ipcRenderer.invoke('notion:archiveChatPage', pageId) as Promise<void>,
   getProjects: () =>
     ipcRenderer.invoke('notion:getProjects') as Promise<
       Array<{ id: string; title: string; lastEdited: string | null; preview: string; color: string | null }>
     >,
   createProject: (title: string) => ipcRenderer.invoke('notion:createProject', title) as Promise<string>,
+  archiveProject: (pageId: string) => ipcRenderer.invoke('notion:archiveProject', pageId) as Promise<void>,
   updateProjectTitle: (pageId: string, title: string) =>
     ipcRenderer.invoke('notion:updateProjectTitle', pageId, title) as Promise<void>,
   getProjectDetail: (pageId: string) =>
@@ -91,7 +106,8 @@ const api = {
       instructions: string
       color: string | null
       blocks: Array<{ id: string; type: string; text: string; checked?: boolean; url?: string }>
-      chats: Array<{ id: string; name: string; sessionId: string | null }>
+      chats: Array<{ id: string; name: string; sessionId: string | null; lastEdited?: string | null }>
+      people: Array<{ id: string; name: string }>
     }>,
   getProjectContext: (projectId: string) =>
     ipcRenderer.invoke('notion:getProjectContext', projectId) as Promise<string>,
@@ -107,10 +123,39 @@ const api = {
     ipcRenderer.invoke('notion:updateContextPageContent', pageId, text) as Promise<void>,
   createContextPage: (projectId: string, title: string, text: string) =>
     ipcRenderer.invoke('notion:createContextPage', projectId, title, text) as Promise<string>,
-  getSystemMarkdown: () => ipcRenderer.invoke('notion:getSystemMarkdown') as Promise<string>,
-  saveSystemMarkdown: (text: string) => ipcRenderer.invoke('notion:saveSystemMarkdown', text) as Promise<void>,
-  getTitleMarkdown: () => ipcRenderer.invoke('notion:getTitleMarkdown') as Promise<string>,
-  saveTitleMarkdown: (text: string) => ipcRenderer.invoke('notion:saveTitleMarkdown', text) as Promise<void>
+  deleteContextPage: (pageId: string) =>
+    ipcRenderer.invoke('notion:deleteContextPage', pageId) as Promise<void>,
+  unlinkChatFromProject: (pageId: string, projectId: string, projectTitle: string) =>
+    ipcRenderer.invoke('notion:unlinkChatFromProject', pageId, projectId, projectTitle) as Promise<void>,
+  linkChatToProject: (pageId: string, projectId: string, projectTitle: string) =>
+    ipcRenderer.invoke('notion:linkChatToProject', pageId, projectId, projectTitle) as Promise<void>,
+  updateProjectPeople: (projectId: string, personIds: string[]) =>
+    ipcRenderer.invoke('notion:updateProjectPeople', projectId, personIds) as Promise<void>,
+  getPeople: () =>
+    ipcRenderer.invoke('notion:getPeople') as Promise<Array<{ id: string; name: string }>>,
+  getPerson: (pageId: string) =>
+    ipcRenderer.invoke('notion:getPerson', pageId) as Promise<{
+      id: string
+      name: string
+      lastEdited: string | null
+      blocks: Array<{ id: string; type: string; text: string; checked?: boolean; url?: string }>
+    }>,
+  createPerson: (name: string) => ipcRenderer.invoke('notion:createPerson', name) as Promise<string>,
+  updatePersonContent: (pageId: string, text: string) =>
+    ipcRenderer.invoke('notion:updatePersonContent', pageId, text) as Promise<void>,
+  renamePerson: (pageId: string, name: string) =>
+    ipcRenderer.invoke('notion:renamePerson', pageId, name) as Promise<void>,
+  archivePerson: (pageId: string) => ipcRenderer.invoke('notion:archivePerson', pageId) as Promise<void>,
+  getSkills: () => ipcRenderer.invoke('notion:getSkills') as Promise<Skill[]>,
+  getSkill: (pageId: string) => ipcRenderer.invoke('notion:getSkill', pageId) as Promise<Skill>,
+  createSkill: (name: string) => ipcRenderer.invoke('notion:createSkill', name) as Promise<string>,
+  saveSkill: (pageId: string, skill: SkillData) =>
+    ipcRenderer.invoke('notion:saveSkill', pageId, skill) as Promise<void>,
+  renameSkill: (pageId: string, name: string) =>
+    ipcRenderer.invoke('notion:renameSkill', pageId, name) as Promise<void>,
+  archiveSkill: (pageId: string) => ipcRenderer.invoke('notion:archiveSkill', pageId) as Promise<void>,
+  getConfig: () => ipcRenderer.invoke('notion:getConfig') as Promise<AppConfig>,
+  saveConfig: (config: AppConfig) => ipcRenderer.invoke('notion:saveConfig', config) as Promise<void>
 }
 
 if (process.contextIsolated) {

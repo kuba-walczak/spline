@@ -1,5 +1,5 @@
-import { useState } from 'react'
-import type { ReactElement } from 'react'
+import { useEffect, useRef, useState } from 'react'
+import type { ReactElement, ReactNode } from 'react'
 import { DeviceDebug } from './DeviceDebug'
 import { Icon } from '@/components/ui/icon'
 import { IconButton } from '@/components/ui/icon-button'
@@ -69,6 +69,18 @@ export interface SidebarProject {
   color: string | null
 }
 
+export interface SidebarPerson {
+  id: string
+  name: string
+}
+
+export interface SidebarSkill {
+  id: string
+  name: string
+  /** Persistent skills carry a different glyph — they stay on, one-shot ones are typed per message. */
+  mode: 'persistent' | 'oneshot'
+}
+
 export interface SidebarProps {
   conversations: SidebarConversation[]
   activeId: number | null
@@ -79,6 +91,17 @@ export interface SidebarProps {
   activeProjectId: string | null
   onSelectProject: (id: string) => void
   onNewProject: () => void
+  onDeleteProject: (id: string) => void
+  skills: SidebarSkill[]
+  activeSkillId: string | null
+  onSelectSkill: (id: string) => void
+  onNewSkill: () => void
+  onDeleteSkill: (id: string) => void
+  people: SidebarPerson[]
+  activePersonId: string | null
+  onSelectPerson: (id: string) => void
+  onNewPerson: () => void
+  onDeletePerson: (id: string) => void
   /** Which top-level view the app is on. */
   route: string
   onNavigate: (route: string) => void
@@ -115,6 +138,126 @@ function ProjectFolder({ color }: { color: string | null }): ReactElement {
 /** Hover and selected background for chat rows — deliberately quieter than the shared
     `--surface-hover` used by the nav items above them. */
 const CHAT_ROW_HIGHLIGHT = '#232323'
+
+/** Width the section selector needs before its labels stop fitting — four items, each an icon plus
+    a word. Below it the selector shows icons alone.
+
+    Measured rather than guessed: "Projects" is the widest and starts clipping around 320px, with
+    everything comfortable by 360. Set above the clipping point rather than at it, since erring high
+    only shows icons a little early, while erring low shows words cut mid-letter. */
+const SECTION_LABEL_WIDTH = 345
+
+interface ManagedRowProps {
+  /** The row's glyph. Projects pass `leading` instead, since their marker is a coloured folder. */
+  icon?: string
+  leading?: ReactNode
+  label: string
+  active: boolean
+  optionsLabel: string
+  onSelect: () => void
+  onDelete: () => void
+}
+
+/** A sidebar row that can be deleted. Carries the same options menu a chat row does — hidden until
+    the row is hovered, so a list stays quiet until you reach for one. Shared by projects, skills
+    and people, which differ only in their glyph. */
+function ManagedRow({
+  icon,
+  leading,
+  label,
+  active,
+  optionsLabel,
+  onSelect,
+  onDelete
+}: ManagedRowProps): ReactElement {
+  const [hover, setHover] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+
+  return (
+    <div
+      style={{ position: 'relative' }}
+      onMouseEnter={() => setHover(true)}
+      onMouseLeave={() => setHover(false)}
+    >
+      <NavItem
+        icon={icon}
+        leading={leading}
+        label={label}
+        active={active}
+        highlight={CHAT_ROW_HIGHLIGHT}
+        hovered={hover || menuOpen}
+        onClick={onSelect}
+      />
+      {hover || menuOpen ? (
+        <div style={{ position: 'absolute', top: 4, bottom: 4, right: 4 }}>
+          <IconButton
+            icon="ellipsis-vertical"
+            label={optionsLabel}
+            size="sm"
+            active={menuOpen}
+            onClick={() => setMenuOpen((v) => !v)}
+            style={{
+              width: 'calc(var(--row-height) - 8px)',
+              height: 'calc(var(--row-height) - 8px)',
+              borderRadius: 'var(--radius-xs)'
+            }}
+          />
+        </div>
+      ) : null}
+      {menuOpen ? (
+        <>
+          <div style={{ position: 'fixed', inset: 0, zIndex: 10 }} onClick={() => setMenuOpen(false)} />
+          <div
+            style={{
+              position: 'absolute',
+              top: 'calc(var(--row-height) + 2px)',
+              right: 4,
+              zIndex: 11,
+              minWidth: 140,
+              padding: 'var(--space-2)',
+              background: '#20201F',
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-md)',
+              boxShadow: '0 8px 24px rgba(0,0,0,0.35)'
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                setMenuOpen(false)
+                onDelete()
+              }}
+              style={{
+                display: 'block',
+                width: '100%',
+                boxSizing: 'border-box',
+                textAlign: 'left',
+                padding: '4px 8px',
+                background: 'transparent',
+                border: 'none',
+                borderRadius: 'var(--radius-sm)',
+                color: '#E6E5E2',
+                fontFamily: 'var(--font-sans)',
+                fontSize: 'var(--text-base)',
+                fontWeight: 'var(--weight-regular)',
+                lineHeight: 'var(--leading-normal)',
+                letterSpacing: 'var(--tracking-tight)',
+                cursor: 'pointer',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis'
+              }}
+              onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--surface-hover)')}
+              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+            >
+              Delete
+            </button>
+          </div>
+        </>
+      ) : null}
+    </div>
+  )
+}
 
 interface ChatRowProps {
   conversation: SidebarConversation
@@ -168,9 +311,19 @@ function ChatRow({ conversation, active, onSelect, onDelete, onOpenProject }: Ch
         hovered={hover || menuOpen}
         onClick={onSelect}
         /* In the flex row rather than floating over it, so a long title is squeezed and ellipsised
-           by the label's own overflow rules instead of running underneath the age. */
+           by the label's own overflow rules instead of running underneath the age. On hover the age
+           yields to a spacer the width of the options button — the title expands, but not under the
+           button. */
         trailing={
-          !hover && !menuOpen && age ? (
+          hover || menuOpen ? (
+            <span
+              style={{
+                flex: '0 0 auto',
+                width: 'calc(var(--row-height) - 4px)',
+                marginLeft: '2px'
+              }}
+            />
+          ) : age ? (
             <span
               style={{
                 flex: '0 0 auto',
@@ -283,10 +436,39 @@ export function Sidebar({
   activeProjectId,
   onSelectProject,
   onNewProject,
+  onDeleteProject,
+  skills,
+  activeSkillId,
+  onSelectSkill,
+  onNewSkill,
+  onDeleteSkill,
+  people,
+  activePersonId,
+  onSelectPerson,
+  onNewPerson,
+  onDeletePerson,
   route,
   onNavigate
 }: SidebarProps): ReactElement {
   const onProjects = route === 'projects' || route === 'project'
+  const onSkills = route === 'skills' || route === 'skill'
+  const onPeople = route === 'people' || route === 'person'
+
+  /* The section selector is four items wide now, and the sidebar is resizable — below the width
+     where the labels fit, they are dropped rather than clipped mid-word. Measured rather than
+     assumed, because the threshold depends on the rendered font. */
+  const navRef = useRef<HTMLDivElement | null>(null)
+  const [iconsOnly, setIconsOnly] = useState(false)
+
+  useEffect(() => {
+    const el = navRef.current
+    if (!el) return
+
+    const observer = new ResizeObserver(([entry]) => setIconsOnly(entry.contentRect.width < SECTION_LABEL_WIDTH))
+    observer.observe(el)
+    return () => observer.disconnect()
+  }, [])
+  const section = onProjects ? 'projects' : onSkills ? 'skills' : onPeople ? 'people' : 'chats'
 
   return (
     <aside
@@ -303,14 +485,17 @@ export function Sidebar({
         minHeight: 0
       }}
     >
-      <div style={{ padding: '0 10px 12px' }}>
+      <div ref={navRef} style={{ padding: '0 10px 12px' }}>
         <SegmentedControl
           fill
-          value={onProjects ? 'projects' : route}
+          iconsOnly={iconsOnly}
+          value={section}
           onChange={onNavigate}
           items={[
-            { value: 'home', label: 'Home', icon: 'house' },
-            { value: 'projects', label: 'Projects', icon: 'folder' }
+            { value: 'chats', label: 'Chats', icon: 'message-circle' },
+            { value: 'projects', label: 'Projects', icon: 'folder' },
+            { value: 'skills', label: 'Skills', icon: 'blocks' },
+            { value: 'people', label: 'People', icon: 'users' }
           ]}
         />
       </div>
@@ -327,6 +512,10 @@ export function Sidebar({
         <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--row-gap)' }}>
           {onProjects ? (
             <NavItem icon="plus" label="New project" emphasis onClick={onNewProject} />
+          ) : onSkills ? (
+            <NavItem icon="plus" label="New skill" emphasis onClick={onNewSkill} />
+          ) : onPeople ? (
+            <NavItem icon="plus" label="New person" emphasis onClick={onNewPerson} />
           ) : (
             <NavItem icon="plus" label="New" emphasis onClick={onNew} />
           )}
@@ -340,12 +529,14 @@ export function Sidebar({
             {projects.length > 0 ? (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--row-gap)' }}>
                 {projects.map((p) => (
-                  <NavItem
+                  <ManagedRow
                     key={p.id}
                     leading={<ProjectFolder color={p.color} />}
                     label={p.title}
                     active={p.id === activeProjectId}
-                    onClick={() => onSelectProject(p.id)}
+                    optionsLabel="Project options"
+                    onSelect={() => onSelectProject(p.id)}
+                    onDelete={() => onDeleteProject(p.id)}
                   />
                 ))}
               </div>
@@ -359,6 +550,70 @@ export function Sidebar({
                 }}
               >
                 No projects yet
+              </div>
+            )}
+          </>
+        ) : onPeople ? (
+          <>
+            <SectionLabel action={<IconButton icon="plus" label="New person" size="sm" onClick={onNewPerson} />}>
+              People
+            </SectionLabel>
+            {people.length > 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--row-gap)' }}>
+                {people.map((person) => (
+                  <ManagedRow
+                    key={person.id}
+                    icon="user"
+                    label={person.name || 'Untitled'}
+                    active={person.id === activePersonId}
+                    optionsLabel="Person options"
+                    onSelect={() => onSelectPerson(person.id)}
+                    onDelete={() => onDeletePerson(person.id)}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div
+                style={{
+                  padding: '2px 14px',
+                  font: 'var(--type-meta)',
+                  letterSpacing: 'var(--tracking-tight)',
+                  color: 'var(--text-faint)'
+                }}
+              >
+                No people yet
+              </div>
+            )}
+          </>
+        ) : onSkills ? (
+          <>
+            <SectionLabel action={<IconButton icon="plus" label="New skill" size="sm" onClick={onNewSkill} />}>
+              Skills
+            </SectionLabel>
+            {skills.length > 0 ? (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--row-gap)' }}>
+                {skills.map((skill) => (
+                  <ManagedRow
+                    key={skill.id}
+                    icon={skill.mode === 'persistent' ? 'pin' : 'blocks'}
+                    label={skill.name || 'Untitled'}
+                    active={skill.id === activeSkillId}
+                    optionsLabel="Skill options"
+                    onSelect={() => onSelectSkill(skill.id)}
+                    onDelete={() => onDeleteSkill(skill.id)}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div
+                style={{
+                  padding: '2px 14px',
+                  font: 'var(--type-meta)',
+                  letterSpacing: 'var(--tracking-tight)',
+                  color: 'var(--text-faint)'
+                }}
+              >
+                No skills yet
               </div>
             )}
           </>

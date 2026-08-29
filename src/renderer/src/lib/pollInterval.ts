@@ -1,10 +1,11 @@
-/* How often the sidebar's "5 minutes ago" labels are recomputed.
+/* How often the sidebar's "5 minutes ago" labels are recomputed, and how often project titles are
+   re-read from Notion.
 
-   Purely a display cadence. The underlying timestamp is read from Notion at startup and moved
-   forward locally on each send, so nothing here talks to the network — the tick only decides how
-   promptly a label catches up with the clock.
+   Chat timestamps are read from Notion at startup and moved forward locally on each send — the tick
+   only decides how promptly those labels catch up with the clock. Project titles do go to the
+   network: a rename in Notion is otherwise invisible until the next launch.
 
-   Stored in localStorage rather than Notion: it is a per-machine preference about redraw frequency,
+   Stored in localStorage rather than Notion: it is a per-machine preference about refresh frequency,
    not something a chat carries with it. */
 
 const STORAGE_KEY = 'jarvis.pollIntervalSeconds'

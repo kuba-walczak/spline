@@ -14,6 +14,10 @@ export interface SegmentedControlProps {
   onChange?: (value: string) => void
   variant?: 'default' | 'inset'
   fill?: boolean
+  /** Drops the labels, leaving each item as its icon. For narrow containers, where the labels would
+      otherwise be clipped mid-word. Items without an icon keep their label regardless — a blank
+      button would be unusable. */
+  iconsOnly?: boolean
   className?: string
   style?: CSSProperties
 }
@@ -24,6 +28,7 @@ export function SegmentedControl({
   onChange,
   variant = 'default',
   fill,
+  iconsOnly,
   className,
   style
 }: SegmentedControlProps): ReactElement {
@@ -46,6 +51,7 @@ export function SegmentedControl({
     >
       {items.map((it) => {
         const on = it.value === value
+        const collapsed = Boolean(iconsOnly && it.icon)
         return (
           <button
             key={it.value}
@@ -53,13 +59,16 @@ export function SegmentedControl({
             role="tab"
             aria-selected={on}
             onClick={() => onChange && onChange(it.value)}
+            title={collapsed ? it.label : undefined}
+            aria-label={collapsed ? it.label : undefined}
             style={{
               display: 'inline-flex',
               alignItems: 'center',
               justifyContent: 'center',
               gap: '6px',
               height: '100%',
-              padding: inset ? '0 12px' : '0 14px',
+              padding: collapsed ? '0' : inset ? '0 12px' : '0 14px',
+              minWidth: 0,
               boxSizing: 'border-box',
               background: on ? (inset ? 'var(--surface-thumb-inset)' : '#363636') : '#1F1F1F',
               border: on
@@ -83,7 +92,7 @@ export function SegmentedControl({
             }}
           >
             {it.icon ? <Icon name={it.icon} size={14} /> : null}
-            {it.label}
+            {collapsed ? null : it.label}
           </button>
         )
       })}

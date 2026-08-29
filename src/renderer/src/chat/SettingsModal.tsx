@@ -3,23 +3,24 @@ import type { ReactElement } from 'react'
 import { Icon } from '@/components/ui/icon'
 import { IconButton } from '@/components/ui/icon-button'
 import { formatPollSeconds, MAX_POLL_SECONDS, MIN_POLL_SECONDS } from '@/lib/pollInterval'
+import { EMPTY_CONFIG, type AppConfig } from '@shared/config'
 
 /* Implementation of `Settings.dc.html` from the Claude app design system,
    scoped down to a single "Prompt" tab per the current spec.
 
-   The textbox round-trips through Notion the same way Instructions/Context do
+   The textboxes round-trip through Notion the same way Instructions/Context do
    elsewhere in the app: draft state, dirty check against the loaded value,
-   explicit sync via the refresh-cw button. Stored as TITLE.md under the Config
-   page (see NotionService.fetch/saveTitleMarkdown). */
+   explicit sync via the refresh-cw button. Both are fields of one JSON block on
+   the Config page (see NotionService.fetch/saveConfig). */
 
 export interface SettingsModalProps {
   onClose: () => void
-  /** Called after SYSTEM.md is saved, so chats rebuild their system prompt from the new text. */
+  /** Called after the config is saved, so chats rebuild their system prompt from the new text. */
   onSystemPromptSaved: () => void
   /** Whether tool groups start expanded. */
   expandTools: boolean
   onExpandToolsChange: (value: boolean) => void
-  /** How often the sidebar's last-active labels are recomputed. */
+  /** How often last-active labels are recomputed and project titles are re-read from Notion. */
   pollSeconds: number
   onPollSecondsChange: (seconds: number) => void
 }
@@ -99,65 +100,46 @@ export function SettingsModal({
 }: SettingsModalProps): ReactElement {
   const [tab, setTab] = useState<SettingsTab>('general')
 
-  const [systemOriginal, setSystemOriginal] = useState('')
-  const [systemDraft, setSystemDraft] = useState('')
-  const [systemLoading, setSystemLoading] = useState(true)
-  const [systemSaving, setSystemSaving] = useState(false)
-  const systemDirty = systemDraft !== systemOriginal
+  /* Both fields live in one JSON block, so they load together and a save writes the pair — editing
+     one must not drop the other. Each still has its own dirty flag, so only the section being edited
+     shows a sync button. */
+  const [config, setConfig] = useState<AppConfig>(EMPTY_CONFIG)
+  const [draft, setDraft] = useState<AppConfig>(EMPTY_CONFIG)
+  const [loading, setLoading] = useState(true)
+  const [failed, setFailed] = useState(false)
+  const [saving, setSaving] = useState(false)
 
-  const [titleOriginal, setTitleOriginal] = useState('')
-  const [titleDraft, setTitleDraft] = useState('')
-  const [titleLoading, setTitleLoading] = useState(true)
-  const [titleSaving, setTitleSaving] = useState(false)
-  const titleDirty = titleDraft !== titleOriginal
-
-  useEffect(() => {
-    window.api
-      .getSystemMarkdown()
-      .then((text) => {
-        setSystemOriginal(text)
-        setSystemDraft(text)
-      })
-      .catch((err) => console.error('[settings] getSystemMarkdown failed:', err))
-      .finally(() => setSystemLoading(false))
-  }, [])
-
-  async function syncSystem(): Promise<void> {
-    if (systemSaving || !systemDirty) return
-    setSystemSaving(true)
-    try {
-      await window.api.saveSystemMarkdown(systemDraft)
-      setSystemOriginal(systemDraft)
-      onSystemPromptSaved()
-    } catch (err) {
-      console.error('[settings] saveSystemMarkdown failed:', err)
-    } finally {
-      setSystemSaving(false)
-    }
-  }
+  const systemDirty = draft.system !== config.system
+  const titleDirty = draft.title !== config.title
+  const placeholder = loading ? 'Loading…' : failed ? 'Could not read the Config block.' : ''
 
   useEffect(() => {
     window.api
-      .getTitleMarkdown()
-      .then((text) => {
-        setTitleOriginal(text)
-        setTitleDraft(text)
+      .getConfig()
+      .then((loaded) => {
+        setConfig(loaded)
+        setDraft(loaded)
       })
-      .catch((err) => console.error('[settings] getTitleMarkdown failed:', err))
-      .finally(() => setTitleLoading(false))
+      .catch((err) => {
+        console.error('[settings] getConfig failed:', err)
+        setFailed(true)
+      })
+      .finally(() => setLoading(false))
   }, [])
 
-
-  async function syncTitle(): Promise<void> {
-    if (titleSaving || !titleDirty) return
-    setTitleSaving(true)
+  /* Writes the whole object either way — the block is one document, and a partial write would blank
+     whichever field the other section is holding. */
+  async function sync(onSaved?: () => void): Promise<void> {
+    if (saving || loading || failed) return
+    setSaving(true)
     try {
-      await window.api.saveTitleMarkdown(titleDraft)
-      setTitleOriginal(titleDraft)
+      await window.api.saveConfig(draft)
+      setConfig(draft)
+      onSaved?.()
     } catch (err) {
-      console.error('[settings] saveTitleMarkdown failed:', err)
+      console.error('[settings] saveConfig failed:', err)
     } finally {
-      setTitleSaving(false)
+      setSaving(false)
     }
   }
 
@@ -341,8 +323,8 @@ export function SettingsModal({
                       icon="refresh-cw"
                       label="Sync to Notion"
                       size="sm"
-                      onClick={() => void syncSystem()}
-                      disabled={systemSaving}
+                      onClick={() => void sync(onSystemPromptSaved)}
+                      disabled={saving}
                     />
                   ) : null}
                 </div>
@@ -355,13 +337,13 @@ export function SettingsModal({
                     color: 'var(--text-muted)'
                   }}
                 >
-                  Appended to every chat's system prompt, ahead of any project context.
+                  Appended to every chat's system prompt, ahead of any project context. Stored as the `system` field of the Config page's JSON block.
                 </p>
                 <textarea
-                  value={systemDraft}
-                  onChange={(e) => setSystemDraft(e.target.value)}
-                  placeholder={systemLoading ? 'Loading…' : ''}
-                  disabled={systemLoading}
+                  value={draft.system}
+                  onChange={(e) => setDraft((d) => ({ ...d, system: e.target.value }))}
+                  placeholder={placeholder}
+                  disabled={loading || failed}
                   style={{
                     width: '100%',
                     maxWidth: '710px',
@@ -403,8 +385,8 @@ export function SettingsModal({
                     icon="refresh-cw"
                     label="Sync to Notion"
                     size="sm"
-                    onClick={() => void syncTitle()}
-                    disabled={titleSaving}
+                    onClick={() => void sync()}
+                    disabled={saving}
                   />
                 ) : null}
               </div>
@@ -416,13 +398,13 @@ export function SettingsModal({
                   color: 'var(--text-muted)'
                 }}
               >
-                The prompt sent when generating a chat's title.
+                The prompt sent when generating a chat's title. Stored as the `title` field of the Config page's JSON block.
               </p>
               <textarea
-                value={titleDraft}
-                onChange={(e) => setTitleDraft(e.target.value)}
-                placeholder={titleLoading ? 'Loading…' : ''}
-                disabled={titleLoading}
+                value={draft.title}
+                onChange={(e) => setDraft((d) => ({ ...d, title: e.target.value }))}
+                placeholder={placeholder}
+                disabled={loading || failed}
                 style={{
                   width: '100%',
                   maxWidth: '710px',
@@ -461,9 +443,10 @@ export function SettingsModal({
                     color: 'var(--text-muted)'
                   }}
                 >
-                  How often the sidebar&rsquo;s &ldquo;last active&rdquo; labels are recalculated. A chat&rsquo;s
-                  timestamp is read when the app starts and updated the moment you send a message &mdash; this only
-                  decides how promptly the wording catches up with the clock.
+                  How often the sidebar&rsquo;s &ldquo;last active&rdquo; labels are recalculated, and how often
+                  project titles are re-read from Notion. A chat&rsquo;s timestamp is read when the app starts and
+                  updated the moment you send a message &mdash; this only decides how promptly the wording catches
+                  up with the clock. A project renamed in Notion is picked up on the next tick.
                 </p>
 
                 <div

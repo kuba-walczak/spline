@@ -12,22 +12,39 @@ import {
   stopAllSessions,
   stopSession
 } from './services/ClaudeService'
-import { readSessionTranscript } from './services/SessionTranscript'
+import { readSessionContextTokens, readSessionTranscript } from './services/SessionTranscript'
+import type { AppConfig } from '../shared/config'
+import type { SkillData } from '../shared/skills'
 import {
   appendProjectNote,
   archiveChatPage,
+  archiveProject,
   createChatPage,
   createContextPage,
   createProjectPage,
+  deleteContextPage,
+  detachChatFromProject,
   fetchChatLog,
-  fetchSystemMarkdown,
-  fetchTitleMarkdown,
+  archivePerson,
+  attachChatToProject,
+  archiveSkill,
+  createPerson,
+  renamePerson,
+  updatePersonContent,
+  createSkill,
+  fetchConfig,
+  fetchPeople,
+  fetchPerson,
+  fetchSkill,
+  fetchSkills,
   fetchProjectContext,
   fetchProjectVersion,
   fetchProjectDetail,
   fetchProjects,
-  saveSystemMarkdown,
-  saveTitleMarkdown,
+  migrateChatProjectRefs,
+  renameSkill,
+  saveConfig,
+  saveSkill,
   setChatEffort,
   setChatModel,
   setChatProjects,
@@ -37,6 +54,7 @@ import {
   updatePageTitle,
   updateProjectColor,
   updateProjectInstructions,
+  updateProjectPeople,
   updateProjectTitle
 } from './services/NotionService'
 import { startWakeWordListener, stopWakeWordListener } from './services/WakeWordService'
@@ -164,6 +182,10 @@ claudeEvents.on('status', (payload) => {
   chatWindow?.webContents.send('claude:status', payload)
 })
 
+claudeEvents.on('debug', (payload) => {
+  chatWindow?.webContents.send('claude:debug', payload)
+})
+
 app.whenReady().then(() => {
   Menu.setApplicationMenu(null)
 
@@ -252,6 +274,15 @@ ipcMain.handle(
   }
 )
 
+ipcMain.handle('claude:readContextTokens', (_event, sessionId: string) => {
+  try {
+    return readSessionContextTokens(sessionId)
+  } catch (error) {
+    console.error('[main] claude:readContextTokens failed:', error)
+    return null
+  }
+})
+
 ipcMain.handle('claude:readTranscript', (_event, sessionId: string) => {
   try {
     return readSessionTranscript(sessionId)
@@ -305,9 +336,16 @@ ipcMain.handle('notion:updatePageTitle', async (_event, pageId: string, name: st
   await updatePageTitle(pageId, name)
 })
 
-ipcMain.handle('notion:setChatProject', async (_event, pageId: string, projectTitles: string[]) => {
-  await setChatProjects(pageId, projectTitles)
+ipcMain.handle('notion:setChatProject', async (_event, pageId: string, projectIds: string[]) => {
+  await setChatProjects(pageId, projectIds)
 })
+
+ipcMain.handle(
+  'notion:migrateChatProjectRefs',
+  async (_event, projects: Array<{ id: string; title: string }>) => {
+    return migrateChatProjectRefs(projects)
+  }
+)
 
 ipcMain.handle('notion:archiveChatPage', async (_event, pageId: string) => {
   await archiveChatPage(pageId)
@@ -324,6 +362,10 @@ ipcMain.handle('notion:getProjects', async () => {
 
 ipcMain.handle('notion:createProject', async (_event, title: string) => {
   return createProjectPage(title)
+})
+
+ipcMain.handle('notion:archiveProject', async (_event, pageId: string) => {
+  await archiveProject(pageId)
 })
 
 ipcMain.handle('notion:updateProjectTitle', async (_event, pageId: string, title: string) => {
@@ -362,18 +404,80 @@ ipcMain.handle('notion:createContextPage', async (_event, projectId: string, tit
   return createContextPage(projectId, title, text)
 })
 
-ipcMain.handle('notion:getSystemMarkdown', async () => {
-  return fetchSystemMarkdown()
+ipcMain.handle('notion:deleteContextPage', async (_event, pageId: string) => {
+  await deleteContextPage(pageId)
 })
 
-ipcMain.handle('notion:saveSystemMarkdown', async (_event, text: string) => {
-  await saveSystemMarkdown(text)
+ipcMain.handle(
+  'notion:unlinkChatFromProject',
+  async (_event, pageId: string, projectId: string, projectTitle: string) => {
+    await detachChatFromProject(pageId, projectId, projectTitle)
+  }
+)
+
+ipcMain.handle(
+  'notion:linkChatToProject',
+  async (_event, pageId: string, projectId: string, projectTitle: string) => {
+    await attachChatToProject(pageId, projectId, projectTitle)
+  }
+)
+
+ipcMain.handle('notion:updateProjectPeople', async (_event, projectId: string, personIds: string[]) => {
+  await updateProjectPeople(projectId, personIds)
 })
 
-ipcMain.handle('notion:getTitleMarkdown', async () => {
-  return fetchTitleMarkdown()
+ipcMain.handle('notion:getPeople', async () => {
+  return fetchPeople()
 })
 
-ipcMain.handle('notion:saveTitleMarkdown', async (_event, text: string) => {
-  await saveTitleMarkdown(text)
+ipcMain.handle('notion:getPerson', async (_event, pageId: string) => {
+  return fetchPerson(pageId)
+})
+
+ipcMain.handle('notion:createPerson', async (_event, name: string) => {
+  return createPerson(name)
+})
+
+ipcMain.handle('notion:updatePersonContent', async (_event, pageId: string, text: string) => {
+  await updatePersonContent(pageId, text)
+})
+
+ipcMain.handle('notion:renamePerson', async (_event, pageId: string, name: string) => {
+  await renamePerson(pageId, name)
+})
+
+ipcMain.handle('notion:archivePerson', async (_event, pageId: string) => {
+  await archivePerson(pageId)
+})
+
+ipcMain.handle('notion:getSkills', async () => {
+  return fetchSkills()
+})
+
+ipcMain.handle('notion:getSkill', async (_event, pageId: string) => {
+  return fetchSkill(pageId)
+})
+
+ipcMain.handle('notion:createSkill', async (_event, name: string) => {
+  return createSkill(name)
+})
+
+ipcMain.handle('notion:saveSkill', async (_event, pageId: string, skill: SkillData) => {
+  await saveSkill(pageId, skill)
+})
+
+ipcMain.handle('notion:renameSkill', async (_event, pageId: string, name: string) => {
+  await renameSkill(pageId, name)
+})
+
+ipcMain.handle('notion:archiveSkill', async (_event, pageId: string) => {
+  await archiveSkill(pageId)
+})
+
+ipcMain.handle('notion:getConfig', async () => {
+  return fetchConfig()
+})
+
+ipcMain.handle('notion:saveConfig', async (_event, config: AppConfig) => {
+  await saveConfig(config)
 })

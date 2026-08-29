@@ -60,16 +60,30 @@ const ALLOWED_TOOLS = [
     'mcp__claude_ai_Notion__notion-update-view'
 ].join(' ')
 
+/* Which built-in tools exist at all, as opposed to `--allowedTools`, which only says which of them
+   may run without asking. The difference is what it costs: every tool the CLI carries ships its
+   full schema in the system prompt on every turn, whether or not the chat is allowed to call it.
+   The default set is 32 tools — Bash, the file editors, Task, the todo list — and none of them are
+   allowed here, so they were ~20k tokens per turn buying nothing. Measured against this binary: 32
+   tools cost 30.2k, these two cost 10.0k. */
+const BUILTIN_TOOLS = 'WebSearch,WebFetch'
+
 interface ResultEvent {
     type: 'result'
     is_error: boolean
     result?: string
 }
 
-/** Emits `{ sessionId, event }` for every parsed stream-json line, unfiltered, and
-    `{ sessionId, status }` on 'status' as a chat's process comes up or goes away. The id is what
-    lets the renderer route either to the chat it belongs to — several sessions run at once. */
+/** Emits `{ sessionId, event }` for every parsed stream-json line, unfiltered,
+    `{ sessionId, status }` on 'status' as a chat's process comes up or goes away, and
+    `{ sessionId, line }` on 'debug' for everything sent to the CLI — the spawn command and every
+    stdin write — plain text for the debug terminal in the chat UI. The id is what lets the
+    renderer route any of these to the chat they belong to — several sessions run at once. */
 export const claudeEvents = new EventEmitter()
+
+function emitDebug(sessionId: string, line: string): void {
+    claudeEvents.emit('debug', { sessionId, line })
+}
 
 /** `idle` — no process. `booting` — spawned, nothing heard back yet. `ready` — the CLI has spoken. */
 export type SessionStatus = 'idle' | 'booting' | 'ready'
@@ -128,6 +142,7 @@ function systemPromptArgs(sessionId: string, systemPrompt: string): string[] {
 
     const path = systemPromptPath(sessionId)
     writeFileSync(path, systemPrompt, 'utf8')
+    emitDebug(sessionId, `--append-system-prompt-file ${path}:\n${systemPrompt}`)
     return ['--append-system-prompt-file', path]
 }
 
@@ -185,6 +200,7 @@ function ensureSession(sessionId: string, model: string, effort: string, systemP
         '-p',
         '--input-format', 'stream-json',
         '--output-format', 'stream-json',
+        '--tools', BUILTIN_TOOLS,
         '--allowedTools', ALLOWED_TOOLS,
         '--verbose',
         /* Drops cwd, env info, memory paths and git status from the system prompt. A chat app has
@@ -198,6 +214,8 @@ function ensureSession(sessionId: string, model: string, effort: string, systemP
         ...systemPromptArgs(sessionId, systemPrompt),
         ...(resuming ? ['--resume', sessionId] : ['--session-id', sessionId])
     ]
+
+    emitDebug(sessionId, `$ ${CLAUDE_EXE} ${args.join(' ')}`)
 
     const proc = spawn(CLAUDE_EXE, args, { cwd: sessionCwd() })
     proc.stdout.setEncoding('utf8')
@@ -259,7 +277,9 @@ export function askClaude(
             type: 'user',
             message: { role: 'user', content: [{ type: 'text', text: prompt }] }
         }
-        session.proc.stdin.write(JSON.stringify(message) + '\n')
+        const line = JSON.stringify(message) + '\n'
+        emitDebug(sessionId, line.trimEnd())
+        session.proc.stdin.write(line)
     })
 }
 
@@ -273,6 +293,12 @@ export function generateChatTitle(prompt: string): Promise<string> {
             '--output-format', 'stream-json',
             '--verbose',
             '--exclude-dynamic-system-prompt-sections',
+            /* Naming a chat needs no tools and no connectors, and both are charged by the token:
+               with the defaults this one-line call was carrying 32 built-in schemas and every
+               MCP server the account has connected — measured at ~62k tokens to produce a title.
+               Empty `--tools` plus strict MCP takes the same call to ~3k. */
+            '--tools', '',
+            '--strict-mcp-config',
             '--model', 'haiku',
             '--no-session-persistence',
             '--settings', noHooksSettingsPath

@@ -5,11 +5,19 @@ import { Sidebar } from './Sidebar'
 import { TitleBar } from './TitleBar'
 import { SettingsModal } from './SettingsModal'
 import { ProjectContextModal } from './ProjectContextModal'
+import { InjectionModal } from '@/components/ui/injection-modal'
 import { clampPollSeconds, loadPollSeconds, savePollSeconds } from '@/lib/pollInterval'
 import { loadExpandTools, saveExpandTools } from '@/lib/expandTools'
+import { loadActiveSkills, saveActiveSkills } from '@/lib/activeSkills'
+import { usageFromEvent } from '@shared/tokenUsage'
 import ProjectDetailView from './ProjectDetailView'
 import { Icon } from '@/components/ui/icon'
+import { IconButton } from '@/components/ui/icon-button'
 import { buildSystemPrompt } from '@shared/injection'
+import { isNotionId, normalizeNotionId, sameNotionId } from '@shared/notionId'
+import { buildSkillsPrompt, renderSkillInvocation, type Skill } from '@shared/skills'
+import SkillDetailView from './SkillDetailView'
+import PersonDetailView from './PersonDetailView'
 import { outcomeFromToolResult, type ToolOutcome } from '@shared/toolResults'
 import type { SessionStatus } from './Sidebar'
 
@@ -73,9 +81,10 @@ interface Conversation {
   effort: string
   sourceId?: string
   loaded?: boolean
-  /** Titles of every project ever injected into this conversation — drives the sidebar tint and locks
-      that project's attach option so it can't be added again. */
-  referencedProjectTitles?: string[]
+  /** Every project this conversation references, as the chat's Notion row stores them: page ids, or
+      titles on a row not written since the app moved off them. Drives the sidebar tint and the
+      chips restored when the chat is reopened. Resolve through `projectsForRefs`, never directly. */
+  referencedProjectRefs?: string[]
   /** Assembled context for every attached project, as last sent to the CLI's system prompt.
       `undefined` means it has not been assembled yet this run — a reopened chat starts that way and
       builds it on its next send. Deliberately not persisted: it is a cache of what Notion holds, and
@@ -87,6 +96,9 @@ interface Conversation {
   /** When this chat was last spoken to, as the sidebar's "5 minutes ago" label. Read from Notion at
       startup and moved forward locally on each send. */
   lastActive?: string | null
+  /** Persistent skills switched on for this chat, by name. Kept in localStorage rather than on the
+      Notion row: it is a per-machine toggle, and the chat database has no column for it. */
+  activeSkillNames?: string[]
 }
 
 interface Project {
@@ -112,6 +124,8 @@ const EFFORTS = [
 ]
 const DEFAULT_EFFORT_ID = 'high'
 const DEFAULT_MODEL_ID = 'opus'
+/** Between the pieces of an assembled system prompt. */
+const SECTION_BREAK = String.fromCharCode(10, 10)
 
 interface ContentBlock {
   type: string
@@ -556,7 +570,13 @@ export default function ChatWindow({
   const [conversations, setConversations] = useState<Conversation[]>([])
   const [notionChats, setNotionChats] = useState<Conversation[]>([])
   const [activeId, setActiveId] = useState<number | null>(null)
-  const [route, setRoute] = useState('home')
+  const [route, setRoute] = useState('chats')
+  const [skills, setSkills] = useState<Skill[]>([])
+  const [activeSkillId, setActiveSkillId] = useState<string | null>(null)
+  const [people, setPeople] = useState<Array<{ id: string; name: string }>>([])
+  const [activePersonId, setActivePersonId] = useState<string | null>(null)
+  /* Chosen in the composer, applied to the next message only. */
+  const [pendingSkill, setPendingSkill] = useState<Skill | null>(null)
   const [projects, setProjects] = useState<Project[]>([])
   const [activeProjectId, setActiveProjectId] = useState<string | null>(null)
   const [creatingProject, setCreatingProject] = useState(false)
@@ -566,23 +586,42 @@ export default function ChatWindow({
   const [settingsOpen, setSettingsOpen] = useState(false)
   const [pollSeconds, setPollSeconds] = useState(loadPollSeconds)
   const [expandTools, setExpandTools] = useState(loadExpandTools)
-  /* SYSTEM.md — prepended to every chat's system prompt. Held in a ref as well as state because
+  /* The configured system instruction, prepended to every chat's system prompt. Held in a ref because
      `assembleSystemPrompt` reads it from inside async work that may have started before an edit
      landed, and the stale closure value would silently reinstate the old instruction. */
-  const systemMarkdown = useRef('')
+  const systemInstruction = useRef('')
   /* Bumped on a timer purely to force a re-render: the sidebar's age labels are derived from
-     `Date.now()` at render time, so nothing else has to change for them to advance. */
+     `Date.now()` at render time, so nothing else has to change for them to advance. The same
+     interval re-reads project titles from Notion. */
   const [, setTick] = useState(0)
   /** Project whose injected context is open in the modal, by id. */
   const [contextProjectId, setContextProjectId] = useState<string | null>(null)
+  /** True while the armed skill's instructions are on screen — read off `pendingSkill`, which
+      already holds the body, so there is nothing to fetch and nothing to keep in sync. */
+  const [showPendingSkill, setShowPendingSkill] = useState(false)
+
+  /* Sending the message disarms the skill, and so does dismissing its chip — both leave the modal
+     with nothing to show. Closed from here rather than at each of those call sites, so a future one
+     cannot forget and leave the next armed skill opening straight into an open modal. */
+  useEffect(() => {
+    if (!pendingSkill) setShowPendingSkill(false)
+  }, [pendingSkill])
   const [draft, setDraft] = useState('')
   const [streamingId, setStreamingId] = useState<number | null>(null)
   /* Model and effort belong to a chat, not the app. These hold the choice for whichever chat is
      open, and seed the next new one so picking a model carries forward the way a user expects. */
   /** Process lifecycle per session id, driving each sidebar row's dot. Absent means idle. */
   const [sessionStatuses, setSessionStatuses] = useState<Record<string, SessionStatus>>({})
+  /** Context held by each session's last turn, in tokens — what the composer's meter draws. Lives
+      for the run only: a reopened chat has no reading until its next turn reports one, and a
+      guessed bar would be worse than none. */
+  const [contextTokens, setContextTokens] = useState<Record<string, number>>({})
   const [modelId, setModelId] = useState(DEFAULT_MODEL_ID)
   const [effortId, setEffortId] = useState(DEFAULT_EFFORT_ID)
+  /** Plain-text record of everything sent to the CLI (spawn command + stdin writes), keyed by
+      session id — the debug terminal's source of truth. */
+  const [debugLogs, setDebugLogs] = useState<Record<string, string[]>>({})
+  const [debugOpen, setDebugOpen] = useState(false)
 
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const lastMessageRef = useRef<HTMLDivElement | null>(null)
@@ -677,7 +716,7 @@ export default function ChatWindow({
                 sourceId: entry.id,
                 /* Replaces rather than merges: the row is the authoritative set, and a project
                    detached from the chat has to stay detached. */
-                referencedProjectTitles: entry.projects,
+                referencedProjectRefs: entry.projectRefs,
                 lastActive: entry.lastActive,
                 systemPrompt: existing?.systemPrompt,
                 contextVersions: existing?.contextVersions
@@ -692,8 +731,19 @@ export default function ChatWindow({
     window.api
       .getProjects()
       .then((entries) => {
-        setProjects(
-          entries.map((entry) => ({ id: entry.id, title: entry.title || 'Untitled', color: entry.color }))
+        const next = entries.map((entry) => ({
+          id: entry.id,
+          title: entry.title || 'Untitled',
+          color: entry.color
+        }))
+        setProjects(next)
+        /* Composer chips hold their own copies — without this a rename would land in the sidebar
+           and leave the attached chips on the old title until the chat was reopened. */
+        setAttachedProjects((prev) =>
+          prev.map((attached) => {
+            const fresh = next.find((p) => sameNotionId(p.id, attached.id))
+            return fresh ?? attached
+          })
         )
       })
       .catch((error) => console.error('[projects] getProjects failed:', error))
@@ -703,6 +753,23 @@ export default function ChatWindow({
     refreshChatLog()
     refreshProjects()
   }, [])
+
+  /* Chats used to be tagged with a project's title, and a title stops matching the moment the
+     project is renamed in Notion. Rewriting those rows to hold ids instead is what makes a rename
+     safe, so it runs once per launch as soon as the project list is in — and does nothing at all
+     once every row has been converted. */
+  const migratedProjectRefs = useRef(false)
+  useEffect(() => {
+    if (projects.length === 0 || migratedProjectRefs.current) return
+    migratedProjectRefs.current = true
+
+    void window.api
+      .migrateChatProjectRefs(projects.map((p) => ({ id: p.id, title: p.title })))
+      .then((count) => {
+        if (count > 0) refreshChatLog()
+      })
+      .catch((error) => console.error('[chat] migrateChatProjectRefs failed:', error))
+  }, [projects])
 
   /* Model and effort are spawn arguments, so changing either replaces the chat's process straight
      away — it comes back on `--resume`, so the conversation is untouched and the sidebar dot shows
@@ -751,34 +818,148 @@ export default function ChatWindow({
 
   const allConversations = notionChats.concat(conversations)
 
-  /** Resolves stored project titles back to the projects themselves. Titles are what a chat's Notion
-      row records, so a project renamed in Notion drops out here until the chat is re-attached. */
-  function projectsForTitles(titles: string[]): Project[] {
-    const byTitle = new Map(projects.map((p) => [p.title, p]))
-    return titles.map((t) => byTitle.get(t)).filter((p): p is Project => Boolean(p))
+  /** Resolves what a chat's row stores back to the projects themselves. Ids are matched as ids, so a
+      project renamed in Notion still resolves; a value that is not an id is a title from before the
+      switch and is matched by name, which is the one case a rename still breaks.
+
+      Deduplicated by project: a row can hold both representations of the same project, and each has
+      to yield one chip and one sidebar folder rather than two. */
+  function projectsForRefs(refs: string[]): Project[] {
+    const resolved = refs.map((ref) =>
+      isNotionId(ref)
+        ? projects.find((p) => sameNotionId(p.id, ref))
+        : projects.find((p) => p.title === ref)
+    )
+
+    return Array.from(
+      new Map(
+        resolved.filter((p): p is Project => Boolean(p)).map((p) => [normalizeNotionId(p.id), p])
+      ).values()
+    )
   }
 
   useEffect(() => {
-    const handle = window.setInterval(() => setTick((t) => t + 1), pollSeconds * 1000)
+    const handle = window.setInterval(() => {
+      setTick((t) => t + 1)
+      refreshProjects()
+    }, pollSeconds * 1000)
     return () => window.clearInterval(handle)
   }, [pollSeconds])
 
   useEffect(() => {
-    void loadSystemMarkdown()
+    void loadSystemInstruction()
+    refreshSkills()
+    refreshPeople()
   }, [])
 
-  async function loadSystemMarkdown(): Promise<void> {
+  function refreshPeople(): void {
+    window.api
+      .getPeople()
+      .then(setPeople)
+      .catch((error) => console.error('[people] getPeople failed:', error))
+  }
+
+  function createPerson(): void {
+    window.api
+      .createPerson('Untitled person')
+      .then((id) => {
+        refreshPeople()
+        setActivePersonId(id)
+        setRoute('person')
+      })
+      .catch((error) => console.error('[people] createPerson failed:', error))
+  }
+
+  function deletePerson(id: string): void {
+    window.api
+      .archivePerson(id)
+      .then(() => {
+        refreshPeople()
+        /* Only leave the person view if it was this person open in it. */
+        if (activePersonId === id) {
+          setActivePersonId(null)
+          setRoute('people')
+        }
+      })
+      .catch((error) => console.error('[people] archivePerson failed:', error))
+  }
+
+  function openPerson(id: string): void {
+    setActivePersonId(id)
+    setRoute('person')
+  }
+
+  function refreshSkills(): void {
+    window.api
+      .getSkills()
+      .then(setSkills)
+      .catch((error) => console.error('[skills] getSkills failed:', error))
+  }
+
+  function createSkill(): void {
+    window.api
+      .createSkill('Untitled skill')
+      .then((id) => {
+        refreshSkills()
+        setActiveSkillId(id)
+        setRoute('skill')
+      })
+      .catch((error) => console.error('[skills] createSkill failed:', error))
+  }
+
+  function deleteSkill(id: string): void {
+    window.api
+      .archiveSkill(id)
+      .then(() => {
+        refreshSkills()
+        /* Only leave the skill view if it was this skill open in it. */
+        if (activeSkillId === id) {
+          setActiveSkillId(null)
+          setRoute('skills')
+        }
+      })
+      .catch((error) => console.error('[skills] archiveSkill failed:', error))
+  }
+
+  /* Switching sections returns to whatever was last open in the target one, rather than dropping
+     back to its list. The ids are already held for the lifetime of the window, so this only decides
+     which route a section resolves to — nothing new is stored, and nothing goes to Notion.
+
+     Each is checked against the loaded list first: an item deleted or renamed out from under us
+     would otherwise route to a detail view that fetches an id Notion no longer has. */
+  function navigate(section: string): void {
+    if (section === 'projects') {
+      setRoute(activeProjectId && projects.some((p) => p.id === activeProjectId) ? 'project' : 'projects')
+      return
+    }
+    if (section === 'skills') {
+      setRoute(activeSkillId && skills.some((sk) => sk.id === activeSkillId) ? 'skill' : 'skills')
+      return
+    }
+    if (section === 'people') {
+      setRoute(activePersonId && people.some((p) => p.id === activePersonId) ? 'person' : 'people')
+      return
+    }
+    setRoute(section)
+  }
+
+  function openSkill(id: string): void {
+    setActiveSkillId(id)
+    setRoute('skill')
+  }
+
+  async function loadSystemInstruction(): Promise<void> {
     try {
-      systemMarkdown.current = (await window.api.getSystemMarkdown()).trim()
+      systemInstruction.current = (await window.api.getConfig()).system.trim()
     } catch (error) {
-      console.error('[chat] getSystemMarkdown failed:', error)
+      console.error('[chat] getConfig failed:', error)
     }
   }
 
   /* An edited instruction has to reach chats already open, so every cached prompt is dropped and
      rebuilt on the next send rather than being patched in place. */
-  async function refreshSystemMarkdown(): Promise<void> {
-    await loadSystemMarkdown()
+  async function refreshSystemInstruction(): Promise<void> {
+    await loadSystemInstruction()
     const clear = (c: Conversation): Conversation => ({ ...c, systemPrompt: undefined, contextVersions: undefined })
     setConversations((prev) => prev.map(clear))
     setNotionChats((prev) => prev.map(clear))
@@ -798,6 +979,7 @@ export default function ChatWindow({
   const active = allConversations.find((c) => c.id === activeId) ?? null
   const messages = active ? active.messages : []
   const contextProject = contextProjectId ? (projects.find((p) => p.id === contextProjectId) ?? null) : null
+  const activeSkill = activeSkillId ? (skills.find((sk) => sk.id === activeSkillId) ?? null) : null
 
   /** Keeps the newest message vertically centered instead of pinned to the bottom edge, near the
       composer — a spacer after the last message pads the scroll area so centering it (via scrollTop)
@@ -843,6 +1025,24 @@ export default function ChatWindow({
 
       const parts = formatEvent(event)
       if (parts.length > 0) appendParts(target, parts)
+    })
+  }, [])
+
+  /* Context usage rides in on the same stream, and is tracked per session rather than per streaming
+     target: it belongs to the chat the event names, whether or not that chat is the one on screen.
+     Each turn overwrites the last — this is how full the window is now, not a running total. */
+  useEffect(() => {
+    if (!window.api.onClaudeEvent) return
+    return window.api.onClaudeEvent(({ sessionId, event }) => {
+      const usage = usageFromEvent(event)
+      if (usage) setContextTokens((prev) => ({ ...prev, [sessionId]: usage.total }))
+    })
+  }, [])
+
+  useEffect(() => {
+    if (!window.api.onClaudeDebug) return
+    return window.api.onClaudeDebug(({ sessionId, line }) => {
+      setDebugLogs((prev) => ({ ...prev, [sessionId]: (prev[sessionId] ?? []).concat(line) }))
     })
   }, [])
 
@@ -918,6 +1118,20 @@ export default function ChatWindow({
         console.error('[chat] readSessionTranscript failed:', error)
         patch(chat.id, (c) => ({ ...c, loaded: false }))
       })
+
+    /* The meter's reading survives a restart the same way the messages do — off the transcript,
+       which records what the API charged for every reply. Without this a reopened chat shows no
+       bar at all until it is spoken to again.
+
+       Never overwrites a live reading: this run's own turns are the better number, and the read is
+       async, so a reply that lands first must not be undone by the file's older count. */
+    void window.api
+      .readSessionContextTokens(chat.sessionId)
+      .then((total) => {
+        if (total === null) return
+        setContextTokens((prev) => (chat.sessionId in prev ? prev : { ...prev, [chat.sessionId]: total }))
+      })
+      .catch((error) => console.error('[chat] readSessionContextTokens failed:', error))
   }
 
   function createConversation(): number {
@@ -962,6 +1176,7 @@ export default function ChatWindow({
      be discarding the very attachments that send is about to use. */
   function startNewChat(): void {
     setAttachedProjects([])
+    setPendingSkill(null)
     createConversation()
   }
 
@@ -1005,6 +1220,24 @@ export default function ChatWindow({
       .finally(() => setCreatingProject(false))
   }
 
+  /** Archives a project in Notion and drops it from the list. Chats that referenced it keep the
+      reference — an id that no longer resolves stops producing a chip, which is what an archived
+      project should look like. */
+  function deleteProject(id: string): void {
+    window.api
+      .archiveProject(id)
+      .then(() => {
+        setProjects((prev) => prev.filter((p) => p.id !== id))
+        refreshProjects()
+        /* Only leave the project view if it was this project open in it. */
+        if (activeProjectId === id) {
+          setActiveProjectId(null)
+          setRoute('projects')
+        }
+      })
+      .catch((error) => console.error('[projects] archiveProject failed:', error))
+  }
+
   interface AssembledContext {
     systemPrompt: string
     /** Stamps the prompt was built from — what a later send compares against to spot an edit. */
@@ -1020,26 +1253,39 @@ export default function ChatWindow({
     return Object.fromEntries(entries)
   }
 
+  /** Persistent skills switched on for a chat, resolved from the ids stored on its Notion row. */
+  function activeSkillsFor(names: string[] | undefined): Skill[] {
+    if (!names || names.length === 0) return []
+    const byName = new Map(skills.filter((sk) => sk.mode === 'persistent').map((sk) => [sk.name, sk]))
+    return names.map((n) => byName.get(n)).filter((sk): sk is Skill => Boolean(sk))
+  }
+
   /** Assembles what the CLI's system prompt gets appended for a set of projects. Empty for an empty
       set, which spawns the process with no extra flags at all.
 
       The stamps are read after the context, not before: a project edited mid-assembly then leaves a
       stamp newer than what was actually fetched, and the next send reassembles. Reading them first
       would record the edit as already included and never pick it up. */
-  async function assembleSystemPrompt(attached: Project[]): Promise<AssembledContext> {
-    const base = systemMarkdown.current
-    if (attached.length === 0) return { systemPrompt: base, versions: {} }
+  async function assembleSystemPrompt(attached: Project[], activeSkills: Skill[]): Promise<AssembledContext> {
+    const base = systemInstruction.current
+    /* Skill bodies are already in hand — they arrived with the skills list — so switching one on
+       costs the respawn and nothing else. */
+    const skillsPrompt = buildSkillsPrompt(activeSkills)
+    const join = (parts: string[]): string => parts.filter((t) => t.trim()).join(SECTION_BREAK)
+
+    if (attached.length === 0) return { systemPrompt: join([base, skillsPrompt]), versions: {} }
+
     try {
       const contexts = await Promise.all(
         attached.map(async (p) => ({ title: p.title, text: (await window.api.getProjectContext(p.id)).trim() }))
       )
       const versions = await readVersions(attached)
       const projectContext = buildSystemPrompt(contexts.map((c) => ({ label: c.title, text: c.text })))
-      return { systemPrompt: [base, projectContext].filter((t) => t.trim()).join('\n\n'), versions }
+      return { systemPrompt: join([base, skillsPrompt, projectContext]), versions }
     } catch (error) {
       console.error('[chat] project context assembly failed:', error)
-      /* The base instruction still applies even when the project fetch failed. */
-      return { systemPrompt: base, versions: {} }
+      /* The base instruction and any switched-on skills still apply when the project fetch failed. */
+      return { systemPrompt: join([base, skillsPrompt]), versions: {} }
     }
   }
 
@@ -1047,7 +1293,7 @@ export default function ChatWindow({
       and respawns the CLI so the new system prompt takes effect now rather than on the next send.
       Attaching and detaching both come through here — the system prompt is replaced wholesale, so a
       removal genuinely drops that project's context rather than leaving it behind in the history. */
-  function applyAttachment(next: Project[]): void {
+  function applyAttachment(next: Project[], nextSkillNames?: string[]): void {
     setAttachedProjects(next)
 
     const conversationId = activeId
@@ -1055,14 +1301,19 @@ export default function ChatWindow({
        staged set when it creates one. */
     if (conversationId === null) return
 
-    const titles = next.map((p) => p.title)
+    const projectIds = next.map((p) => p.id)
     const sessionId = sessionIdByConversation.current.get(conversationId)
+    const conversation = conversationsRef.current.find((c) => c.id === conversationId)
+    const skillNames = nextSkillNames ?? conversation?.activeSkillNames ?? []
+
+    if (nextSkillNames && sessionId) saveActiveSkills(sessionId, nextSkillNames)
 
     void (async () => {
-      const { systemPrompt, versions } = await assembleSystemPrompt(next)
+      const { systemPrompt, versions } = await assembleSystemPrompt(next, activeSkillsFor(skillNames))
       patch(conversationId, (c) => ({
         ...c,
-        referencedProjectTitles: titles,
+        referencedProjectRefs: projectIds,
+        activeSkillNames: skillNames,
         systemPrompt,
         contextVersions: versions
       }))
@@ -1079,11 +1330,23 @@ export default function ChatWindow({
 
       try {
         const sourceId = await ensureSourceId(conversationId)
-        if (sourceId) await window.api.setChatProject(sourceId, titles)
+        if (sourceId) await window.api.setChatProject(sourceId, projectIds)
       } catch (error) {
         console.error('[chat] setChatProject failed:', error)
       }
     })()
+  }
+
+  /** Switching a persistent skill on or off for the active chat. Reuses the attachment path, so the
+      system prompt is rebuilt and the process respawned exactly as it is for a project. */
+  function toggleSkill(name: string): void {
+    const conversationId = activeId
+    const current =
+      (conversationId !== null
+        ? conversationsRef.current.find((c) => c.id === conversationId)?.activeSkillNames
+        : undefined) ?? []
+    const next = current.includes(name) ? current.filter((n) => n !== name) : current.concat(name)
+    applyAttachment(attachedProjects, next)
   }
 
   function attachProject(id: string): void {
@@ -1094,6 +1357,32 @@ export default function ChatWindow({
 
   function removeAttachedProject(id: string): void {
     applyAttachment(attachedProjects.filter((p) => p.id !== id))
+  }
+
+  /** A chat unlinked from a project over in the project view. Its stored refs are what the sidebar
+      tint, the chips and the next send's Notion write all read from, so they have to drop the project
+      too — and the cached system prompt with them, so the next send reassembles without its context.
+
+      The title is dropped alongside the id because a row untouched since the switch still holds the
+      title, and that is the copy the unlink just removed in Notion. */
+  function chatUnlinkedFromProject(chatId: string, projectId: string, projectTitle: string): void {
+    const drop = (c: Conversation): Conversation =>
+      c.sourceId !== chatId
+        ? c
+        : {
+            ...c,
+            referencedProjectRefs: (c.referencedProjectRefs ?? []).filter(
+              (ref) => !(isNotionId(ref) ? sameNotionId(ref, projectId) : ref === projectTitle)
+            ),
+            systemPrompt: undefined,
+            contextVersions: undefined
+          }
+
+    setConversations((prev) => prev.map(drop))
+    setNotionChats((prev) => prev.map(drop))
+    if (allConversations.find((c) => c.id === activeId)?.sourceId === chatId) {
+      setAttachedProjects((prev) => prev.filter((p) => !sameNotionId(p.id, projectId)))
+    }
   }
 
   function deleteConversation(id: number): void {
@@ -1125,7 +1414,7 @@ export default function ChatWindow({
 
   function selectConversation(id: number): void {
     setActiveId(id)
-    setRoute('home')
+    setRoute('chats')
     /* The pickers follow the chat, so reopening one restores the model and effort it was using. */
     const chat = allConversations.find((c) => c.id === id)
     if (chat) {
@@ -1133,7 +1422,12 @@ export default function ChatWindow({
       setEffortId(chat.effort || DEFAULT_EFFORT_ID)
       /* The chips are the only place an attachment is shown, so they have to follow the chat too —
          they are its live set, not a staging area for the next message. */
-      setAttachedProjects(projectsForTitles(chat.referencedProjectTitles ?? []))
+      setAttachedProjects(projectsForRefs(chat.referencedProjectRefs ?? []))
+      /* Skills are stored per session rather than on the conversation, so they are read back here
+         rather than arriving with the chat log. */
+      const active = loadActiveSkills(chat.sessionId)
+      patch(chat.id, (c) => ({ ...c, activeSkillNames: active }))
+      setPendingSkill(null)
     }
     const notionChat = notionChats.find((c) => c.id === id)
     if (notionChat) loadTranscript(notionChat)
@@ -1154,10 +1448,17 @@ export default function ChatWindow({
     /* The attached set is the whole story now: it is what the system prompt is assembled from, and
        the system prompt is replaced wholesale at every spawn. Nothing is per-turn any more — a
        project detached before this send contributes nothing to it. */
-    const projectTitlesForNotion = attachedProjects.map((p) => p.title)
+    const projectIdsForNotion = attachedProjects.map((p) => p.id)
 
+    /* A one-shot skill is resolved here, not by the model: its body is already loaded, so the turn
+       goes out with the instructions in it and no round trip in between. Only the user's own text is
+       shown in the bubble — the body is recovered from the transcript the same way, and dropped. */
+    const skill = pendingSkill
     const userParts: MessagePart[] = textPart(text)
-    const sendText = text
+    const sendText = skill ? renderSkillInvocation(skill.name, skill.body, text) : text
+
+    const activeSkills = activeSkillsFor(conv?.activeSkillNames)
+
     /* Reassemble when the cache is missing (a reopened chat) or when any attached project has been
        edited since it was built — in Notion, or by another chat that this project has attached. The
        stamp costs three API calls against the context's three-plus-N, so checking every send is
@@ -1165,7 +1466,7 @@ export default function ChatWindow({
     let systemPrompt = conv?.systemPrompt ?? ''
     let contextVersions = conv?.contextVersions
     if (conv?.systemPrompt === undefined) {
-      ({ systemPrompt, versions: contextVersions } = await assembleSystemPrompt(attachedProjects))
+      ({ systemPrompt, versions: contextVersions } = await assembleSystemPrompt(attachedProjects, activeSkills))
     } else if (attachedProjects.length > 0) {
       const fresh = await readVersions(attachedProjects).catch((error) => {
         console.error('[chat] project version check failed:', error)
@@ -1173,7 +1474,7 @@ export default function ChatWindow({
       })
       /* A failed check leaves the cache alone: sending stale context beats dropping it. */
       if (fresh && attachedProjects.some((p) => fresh[p.id] !== contextVersions?.[p.id])) {
-        ({ systemPrompt, versions: contextVersions } = await assembleSystemPrompt(attachedProjects))
+        ({ systemPrompt, versions: contextVersions } = await assembleSystemPrompt(attachedProjects, activeSkills))
       }
     }
 
@@ -1188,7 +1489,7 @@ export default function ChatWindow({
       ...c,
       title: placeholderTitle,
       messages: c.messages.concat([userMsg, { id: botId, role: 'assistant', parts: [] }]),
-      referencedProjectTitles: projectTitlesForNotion,
+      referencedProjectRefs: projectIdsForNotion,
       systemPrompt,
       contextVersions,
       /* Mirrors the `updateLastActive` write below, so the label moves the moment the message is
@@ -1196,15 +1497,17 @@ export default function ChatWindow({
       lastActive: new Date().toISOString()
     }))
     setDraft('')
+    /* One-shot means one turn: it is spent the moment it is sent. */
+    setPendingSkill(null)
     setStreamingId(conversationId)
 
     /* Re-title the chat from every user message it now contains — runs on its own isolated
        haiku call, independent of the main conversation, and never blocks sending the prompt.
-       The instruction itself is the content of TITLE.md under the Config page (Settings >
-       Injection > Title) — no title refresh happens until that page has text. */
+       The instruction itself is the `title` field of the Config page's JSON block (Settings >
+       Injection > Title) — no title refresh happens until that field has text. */
     async function refreshTitle(): Promise<void> {
       try {
-        const instruction = (await window.api.getTitleMarkdown()).trim()
+        const instruction = (await window.api.getConfig()).title.trim()
         if (!instruction) return
         const priorUserTexts = priorMessages
           .filter((m) => m.role === 'user')
@@ -1246,7 +1549,7 @@ export default function ChatWindow({
     const sourceId = await ensureSourceId(conversationId)
     if (!sourceId) return
     try {
-      if (projectTitlesForNotion.length > 0) await window.api.setChatProject(sourceId, projectTitlesForNotion)
+      if (projectIdsForNotion.length > 0) await window.api.setChatProject(sourceId, projectIdsForNotion)
       await window.api.updateLastActive(sourceId)
       refreshChatLog()
     } catch (error) {
@@ -1345,7 +1648,7 @@ export default function ChatWindow({
       {settingsOpen ? (
         <SettingsModal
           onClose={() => setSettingsOpen(false)}
-          onSystemPromptSaved={() => void refreshSystemMarkdown()}
+          onSystemPromptSaved={() => void refreshSystemInstruction()}
           expandTools={expandTools}
           onExpandToolsChange={changeExpandTools}
           pollSeconds={pollSeconds}
@@ -1358,6 +1661,15 @@ export default function ChatWindow({
           title={contextProject.title}
           onClose={() => setContextProjectId(null)}
         />
+      ) : null}
+      {showPendingSkill && pendingSkill ? (
+        <InjectionModal
+          title={pendingSkill.name}
+          subtitle="Sent with the next message"
+          onClose={() => setShowPendingSkill(false)}
+        >
+          {pendingSkill.body.trim() || 'This skill is empty — nothing is sent for it.'}
+        </InjectionModal>
       ) : null}
 
       <div style={{ display: 'flex', flex: '1 1 auto', minHeight: 0, overflow: 'hidden' }}>
@@ -1378,7 +1690,7 @@ export default function ChatWindow({
               conversations={allConversations.map((c) => ({
                 id: c.id,
                 title: c.title,
-                projects: projectsForTitles(c.referencedProjectTitles ?? []),
+                projects: projectsForRefs(c.referencedProjectRefs ?? []),
                 status: sessionStatuses[c.sessionId] ?? 'idle',
                 lastActive: c.lastActive
               }))}
@@ -1389,9 +1701,20 @@ export default function ChatWindow({
               projects={projects}
               activeProjectId={activeProjectId}
               onSelectProject={openProject}
+              onDeleteProject={deleteProject}
+              skills={skills.map((sk) => ({ id: sk.id, name: sk.name, mode: sk.mode }))}
+              activeSkillId={activeSkillId}
+              onSelectSkill={openSkill}
+              onNewSkill={createSkill}
+              onDeleteSkill={deleteSkill}
+              people={people}
+              activePersonId={activePersonId}
+              onSelectPerson={openPerson}
+              onNewPerson={createPerson}
+              onDeletePerson={deletePerson}
               onNewProject={newProject}
               route={route}
-              onNavigate={setRoute}
+              onNavigate={navigate}
             />
             <div
               onMouseDown={startSidebarResize}
@@ -1423,7 +1746,49 @@ export default function ChatWindow({
             overflow: 'hidden'
           }}
         >
-          {route === 'projects' ? (
+          {route === 'people' || (route === 'person' && !activePersonId) ? (
+            <div
+              style={{
+                flex: '1 1 auto',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: '0 24px'
+              }}
+            >
+              <span style={{ font: 'var(--type-body)', color: 'var(--text-faint)' }}>
+                Select a person from the sidebar, or add a new one.
+              </span>
+            </div>
+          ) : route === 'person' && activePersonId ? (
+            <PersonDetailView
+              personId={activePersonId}
+              fallbackName={people.find((p) => p.id === activePersonId)?.name ?? ''}
+              onBack={() => setRoute('people')}
+              onSaved={refreshPeople}
+            />
+          ) : route === 'skills' || (route === 'skill' && !activeSkillId) ? (
+            <div
+              style={{
+                flex: '1 1 auto',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: '0 24px'
+              }}
+            >
+              <span style={{ font: 'var(--type-body)', color: 'var(--text-faint)' }}>
+                Select a skill from the sidebar, or write a new one.
+              </span>
+            </div>
+          ) : route === 'skill' && activeSkillId ? (
+            <SkillDetailView
+              skillId={activeSkillId}
+              fallbackName={activeSkill?.name ?? ''}
+              onBack={() => setRoute('skills')}
+              onSaved={refreshSkills}
+            />
+          ) : route === 'projects' ? (
           <div
             style={{
               flex: '1 1 auto',
@@ -1442,6 +1807,8 @@ export default function ChatWindow({
             projectId={activeProjectId}
             onBack={() => setRoute('projects')}
             onOpenChat={openChatBySourceId}
+            onOpenPerson={openPerson}
+            onChatUnlinked={chatUnlinkedFromProject}
             onColorChange={(id, color) =>
               setProjects((prev) => prev.map((p) => (p.id === id ? { ...p, color } : p)))
             }
@@ -1470,6 +1837,56 @@ export default function ChatWindow({
             {active ? active.title : 'No conversation'}
           </span>
         </nav>
+        {active ? (
+          <IconButton
+            icon="terminal"
+            label="Show what's sent to the CLI"
+            size="md"
+            glyphSize={19}
+            active={debugOpen}
+            onClick={() => setDebugOpen((v) => !v)}
+            style={{
+              position: 'absolute',
+              top: 22,
+              right: 28,
+              zIndex: 20,
+              pointerEvents: 'auto',
+              color: '#E2E1DE'
+            }}
+          />
+        ) : null}
+        {debugOpen && active ? (
+          <div
+            className="chatscroll"
+            style={{
+              position: 'absolute',
+              top: 56,
+              right: 28,
+              width: 480,
+              maxHeight: '60%',
+              overflowY: 'auto',
+              background: '#111110',
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-lg)',
+              padding: '10px 12px',
+              zIndex: 10,
+              font: 'var(--weight-regular) var(--text-sm)/1.5 var(--font-mono)',
+              whiteSpace: 'pre-wrap',
+              overflowWrap: 'anywhere',
+              color: '#B7B6B2'
+            }}
+          >
+            {(debugLogs[active.sessionId] ?? []).length > 0 ? (
+              (debugLogs[active.sessionId] ?? []).map((line, i) => (
+                <div key={i} style={{ marginBottom: '8px' }}>
+                  {line}
+                </div>
+              ))
+            ) : (
+              <span style={{ color: 'var(--text-faint)' }}>Nothing sent to the CLI yet.</span>
+            )}
+          </div>
+        ) : null}
         <div
           ref={scrollRef}
           className="chatscroll"
@@ -1557,6 +1974,14 @@ export default function ChatWindow({
             onSelectProject={attachProject}
             onRemoveProject={removeAttachedProject}
             onOpenProject={setContextProjectId}
+            skills={skills.map((sk) => ({ id: sk.id, name: sk.name, mode: sk.mode }))}
+            activeSkillNames={active?.activeSkillNames ?? []}
+            onToggleSkill={toggleSkill}
+            pendingSkillName={pendingSkill?.name ?? null}
+            onInvokeSkill={(id) => setPendingSkill(skills.find((sk) => sk.id === id) ?? null)}
+            onClearPendingSkill={() => setPendingSkill(null)}
+            onOpenPendingSkill={() => setShowPendingSkill(true)}
+            contextTokens={active ? (contextTokens[active.sessionId] ?? null) : null}
             style={{ maxWidth: 'var(--container)', minHeight: '104px' }}
           />
         </div>

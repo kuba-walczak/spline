@@ -1,11 +1,17 @@
 import 'dotenv/config'
 import { readSessionTranscript } from './SessionTranscript'
-import { CONTEXT_SEPARATOR, DEFAULT_SYSTEM_PROMPT } from '../../shared/injection'
+import { CONTEXT_SEPARATOR } from '../../shared/injection'
+import { EMPTY_CONFIG, parseConfig, serializeConfig, type AppConfig } from '../../shared/config'
+import { markdownToBlocks, type MarkdownBlock } from '../../shared/markdown'
+import { EMPTY_SKILL_DATA, parseSkillData, serializeSkillData, type Skill, type SkillData } from '../../shared/skills'
+import { isNotionId, normalizeNotionId, sameNotionId } from '../../shared/notionId'
 
 const NOTION_VERSION = '2025-09-03'
 const CHAT_LOG_DATA_SOURCE_ID = 'efe919c7-c9c1-404e-ac41-2b5210790815'
 const PROJECTS_PAGE_ID = '31bb837d9c3180ab9ed4fd1eb7e752a9'
 const CONFIG_PAGE_ID = '3c6b837d9c31801a9e5df548713eca5e'
+const SKILLS_PAGE_ID = '3cbb837d9c318021bf05fedebf3005e1'
+const PEOPLE_PAGE_ID = '3cbb837d9c318032af5fffeb1d48a507'
 
 function headers(): Record<string, string> {
     const apiKey = process.env.NOTION_API_KEY
@@ -30,7 +36,9 @@ export interface ChatLogEntry {
     id: string
     name: string
     lastActive: string | null
-    projects: string[]
+    /** Which projects this chat belongs to, as project page ids. Rows last written before the app
+        moved off titles hold the project's title instead — see `projectRefs`. */
+    projectRefs: string[]
     /** The CLI session id whose transcript holds this chat. Null only for rows written before
         the app moved to session-backed chats — those have no recoverable history. */
     sessionId: string | null
@@ -105,6 +113,36 @@ interface NotionPage {
     properties: Record<string, unknown>
 }
 
+/** The raw values of the chat's "Project" tags — page ids now, titles on rows not written since.
+
+    Read tolerantly, because the column has worn every shape Notion offers for this: it was a single
+    select before it was a multi-select, and holding ids rather than names is a reason someone might
+    yet turn it into a plain text field. */
+function projectRefs(properties: Record<string, unknown>): string[] {
+    const prop = properties.Project as
+        | {
+              multi_select?: Array<{ name: string }>
+              select?: { name: string } | null
+              rich_text?: NotionRichText[]
+          }
+        | undefined
+
+    if (prop?.multi_select) return prop.multi_select.map((o) => o.name)
+    if (prop?.select) return [prop.select.name]
+
+    return plainText(prop?.rich_text)
+        .split(',')
+        .map((value) => value.trim())
+        .filter(Boolean)
+}
+
+/** Whether a chat's tags claim it for this project. Anything that looks like an id is matched as
+    one; anything else is a title left over from before the switch, and is matched by name so those
+    rows keep working until something rewrites them. */
+function linksToProject(refs: string[], projectId: string, projectTitle: string): boolean {
+    return refs.some((ref) => (isNotionId(ref) ? sameNotionId(ref, projectId) : ref === projectTitle))
+}
+
 export async function fetchChatLog(): Promise<ChatLogEntry[]> {
     const res = await fetch(`https://api.notion.com/v1/data_sources/${CHAT_LOG_DATA_SOURCE_ID}/query`, {
         method: 'POST',
@@ -119,20 +157,11 @@ export async function fetchChatLog(): Promise<ChatLogEntry[]> {
     return data.results.map((page) => {
         const nameProp = page.properties.Name as { title?: NotionRichText[] } | undefined
         const lastActiveProp = page.properties['Last active'] as { date?: { start: string } } | undefined
-        const projectProp = page.properties.Project as
-            | { multi_select?: Array<{ name: string }>; select?: { name: string } | null }
-            | undefined
-        const projects = projectProp?.multi_select
-            ? projectProp.multi_select.map((o) => o.name)
-            : projectProp?.select
-                ? [projectProp.select.name]
-                : []
-
         return {
             id: page.id,
             name: plainText(nameProp?.title),
             lastActive: lastActiveProp?.date?.start ?? null,
-            projects,
+            projectRefs: projectRefs(page.properties),
             sessionId: scalarProperty(page, 'Session ID'),
             model: scalarProperty(page, 'Model'),
             effort: scalarProperty(page, 'Effort'),
@@ -158,7 +187,7 @@ interface NotionBlock {
     numbered_list_item?: { rich_text: NotionRichText[] }
     to_do?: { rich_text: NotionRichText[]; checked?: boolean }
     quote?: { rich_text: NotionRichText[] }
-    code?: { rich_text: NotionRichText[] }
+    code?: { rich_text: NotionRichText[]; language?: string }
     child_page?: { title: string }
     image?: { type: 'file' | 'external'; file?: { url: string }; external?: { url: string } }
 }
@@ -190,17 +219,76 @@ function toRichText(text: string): Array<{ type: 'text'; text: { content: string
     return chunks.map((content) => ({ type: 'text', text: { content } }))
 }
 
- /** Sets the Chat Log's "Project" multi-select property — each name must match an existing project title. */
-export async function setChatProjects(pageId: string, projectTitles: string[]): Promise<void> {
+/** Replaces the Chat Log's "Project" multi-select with one option per project page id.
+
+    Ids rather than titles: the option name is the whole of the link, and renaming a project page in
+    Notion leaves existing options and existing rows untouched — so a title here comes undone the
+    moment the project is renamed, silently, while an id never moves. The cost is that the column
+    reads as uuids in Notion. Writing a row is also what migrates it off titles. */
+export async function setChatProjects(pageId: string, projectIds: string[]): Promise<void> {
     const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
         method: 'PATCH',
         headers: headers(),
         body: JSON.stringify({
-            properties: { Project: { multi_select: projectTitles.map((name) => ({ name })) } }
+            properties: { Project: { multi_select: projectIds.map((name) => ({ name })) } }
         })
     })
 
     if (!res.ok) throw new Error(`Notion chat project update failed: ${res.status} ${await res.text()}`)
+}
+
+/** Drops one project from a chat's "Project" tags, leaving the row itself and its other tags alone.
+    The current set is read back from Notion rather than taken from the caller, so a chat tagged from
+    somewhere else keeps those tags. The title is needed as well as the id because a row that has not
+    been written since the switch still names the project rather than pointing at it. */
+export async function detachChatFromProject(
+    pageId: string,
+    projectId: string,
+    projectTitle: string
+): Promise<void> {
+    const page = await fetchPage(pageId)
+    const current = projectRefs(page.properties ?? {})
+    const next = current.filter((ref) => !linksToProject([ref], projectId, projectTitle))
+    if (next.length === current.length) return
+
+    await setChatProjects(pageId, next)
+}
+
+/** Converts every chat row still tagged with a project title over to that project's id, so nothing
+    is left depending on the title fallback — a row that has been migrated survives a rename in
+    Notion, one that has not does not.
+
+    Called with the project list rather than reading it, because the renderer already holds one and
+    building it costs a request per project. Rows are written only when something actually changes,
+    so this settles into a pair of reads and can run at every start. A title matching no known
+    project is left as it is: an archived project or a typo is not this function's to throw away.
+
+    Sequential on purpose. Notion rate-limits at roughly three requests a second, and one in-flight
+    request at a time stays under that without any retry machinery. Returns the number of rows it
+    rewrote. */
+export async function migrateChatProjectRefs(
+    projects: Array<{ id: string; title: string }>
+): Promise<number> {
+    const idByTitle = new Map(projects.map((p) => [p.title, p.id]))
+    const log = await fetchChatLog()
+    let migrated = 0
+
+    for (const chat of log) {
+        const replaced = chat.projectRefs.map((ref) => (isNotionId(ref) ? ref : (idByTitle.get(ref) ?? ref)))
+        /* A row holding both the id and the old title of one project collapses to a single tag. */
+        const next = Array.from(
+            new Map(replaced.map((ref) => [isNotionId(ref) ? normalizeNotionId(ref) : ref, ref])).values()
+        )
+
+        const unchanged =
+            next.length === chat.projectRefs.length && next.every((ref, i) => ref === chat.projectRefs[i])
+        if (unchanged) continue
+
+        await setChatProjects(chat.id, next)
+        migrated++
+    }
+
+    return migrated
 }
 
 export async function createChatPage(
@@ -337,6 +425,13 @@ export async function createProjectPage(title: string): Promise<string> {
     return data.id
 }
 
+/** Archiving a project archives its page, the same soft delete a chat, skill or person gets. The
+    chats that referenced it keep their reference: a row points at a project by id, and a project
+    that is gone simply stops resolving. */
+export async function archiveProject(pageId: string): Promise<void> {
+    await archiveChatPage(pageId)
+}
+
 export async function updateProjectTitle(pageId: string, title: string): Promise<void> {
     const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
         method: 'PATCH',
@@ -428,6 +523,8 @@ export interface ProjectDetail {
     color: string | null
     blocks: ProjectDetailBlock[]
     chats: ProjectChatEntry[]
+    /** People attached to this project, resolved from the ids in its CLAUDE.md block. */
+    people: PersonEntry[]
 }
 
 function isInstructionsPage(block: NotionBlock): boolean {
@@ -437,9 +534,13 @@ function isInstructionsPage(block: NotionBlock): boolean {
 interface ClaudeMdData {
     instructions: string
     color: string | null
+    /** Page ids of the people attached to this project. Held here rather than on the person's page:
+        a person is a plain child page with no properties to hang a back-reference from, and the
+        attachment belongs to the project anyway. */
+    people: string[]
 }
 
-const EMPTY_CLAUDE_MD: ClaudeMdData = { instructions: '', color: null }
+const EMPTY_CLAUDE_MD: ClaudeMdData = { instructions: '', color: null, people: [] }
 
 /** The "CLAUDE.md" page's body: a single `json` code block, falling back to its raw text if it isn't parseable JSON. */
 async function readClaudeMdText(pageId: string): Promise<string> {
@@ -456,12 +557,16 @@ async function readClaudeMdText(pageId: string): Promise<string> {
 
 function parseClaudeMd(text: string): ClaudeMdData {
     try {
-        const parsed = JSON.parse(text) as { instructions?: unknown; color?: unknown }
+        const parsed = JSON.parse(text) as { instructions?: unknown; color?: unknown; people?: unknown }
         const instructions = typeof parsed.instructions === 'string' ? parsed.instructions : ''
         const color = typeof parsed.color === 'string' && HEX_COLOR.test(parsed.color) ? parsed.color : null
-        return { instructions, color }
+        const people = Array.isArray(parsed.people)
+            ? parsed.people.filter((id): id is string => typeof id === 'string')
+            : []
+        return { instructions, color, people }
     } catch {
-        return { instructions: text, color: null }
+        /* Written before the block was JSON: the whole body was the instructions. */
+        return { instructions: text, color: null, people: [] }
     }
 }
 
@@ -489,10 +594,28 @@ async function createChildPage(parentId: string, title: string): Promise<string>
     return data.id
 }
 
-async function setParagraphs(blockId: string, text: string): Promise<void> {
-    const children = text
-        .split('\n')
-        .map((line) => ({ object: 'block', type: 'paragraph', paragraph: { rich_text: toRichText(line) } }))
+/** Turns one parsed block into the payload Notion wants. Every arm here has a markdown spelling in
+    `blocksToMarkdown`, which is what keeps the round trip honest. */
+function toNotionBlock(block: MarkdownBlock): Record<string, unknown> {
+    const rich_text = toRichText(block.text)
+
+    switch (block.type) {
+        case 'divider':
+            return { object: 'block', type: 'divider', divider: {} }
+        case 'to_do':
+            return { object: 'block', type: 'to_do', to_do: { rich_text, checked: block.checked ?? false } }
+        case 'code':
+            /* Notion requires a language and validates it against a fixed list; the app does not
+               carry one, so every fence is stored plain. */
+            return { object: 'block', type: 'code', code: { rich_text, language: 'plain text' } }
+        default:
+            return { object: 'block', type: block.type, [block.type]: { rich_text } }
+    }
+}
+
+/** Lays a markdown body down as blocks. Notion caps a single append at 100 children. */
+async function setMarkdownBlocks(blockId: string, text: string): Promise<void> {
+    const children = markdownToBlocks(text).map(toNotionBlock)
 
     for (let i = 0; i < children.length; i += 100) {
         const res = await fetch(`https://api.notion.com/v1/blocks/${blockId}/children`, {
@@ -500,7 +623,7 @@ async function setParagraphs(blockId: string, text: string): Promise<void> {
             headers: headers(),
             body: JSON.stringify({ children: children.slice(i, i + 100) })
         })
-        if (!res.ok) throw new Error(`Notion append paragraphs failed: ${res.status} ${await res.text()}`)
+        if (!res.ok) throw new Error(`Notion append blocks failed: ${res.status} ${await res.text()}`)
     }
 }
 
@@ -517,15 +640,35 @@ async function getOrCreateClaudeMd(projectId: string): Promise<{ id: string; cur
 /** Rewrites the dedicated "CLAUDE.md" child page's JSON body with `text` as the instructions, preserving its color. */
 export async function updateProjectInstructions(projectId: string, text: string): Promise<void> {
     const { id, current } = await getOrCreateClaudeMd(projectId)
-    const data: ClaudeMdData = { instructions: text, color: current.color }
-    await replaceCodeBlock(id, 'json', JSON.stringify(data, null, 2))
+    await replaceCodeBlock(id, 'json', JSON.stringify({ ...current, instructions: text }, null, 2))
+}
+
+/** Replaces the project's attached people. Callers pass the whole list, so attaching and detaching
+    are the same write. */
+export async function updateProjectPeople(projectId: string, personIds: string[]): Promise<void> {
+    const { id, current } = await getOrCreateClaudeMd(projectId)
+    await replaceCodeBlock(id, 'json', JSON.stringify({ ...current, people: personIds }, null, 2))
 }
 
 /** Rewrites the dedicated "CLAUDE.md" child page's JSON body with `color`, preserving its instructions. */
 export async function updateProjectColor(projectId: string, color: string): Promise<void> {
     const { id, current } = await getOrCreateClaudeMd(projectId)
-    const data: ClaudeMdData = { instructions: current.instructions, color }
-    await replaceCodeBlock(id, 'json', JSON.stringify(data, null, 2))
+    await replaceCodeBlock(id, 'json', JSON.stringify({ ...current, color }, null, 2))
+}
+
+/** Adds a project to a chat's row, leaving whatever else it was already filed under. Mirrors
+    `detachChatFromProject`: the current tags are read back from Notion rather than taken from the
+    caller, so a chat tagged from somewhere else keeps those tags. */
+export async function attachChatToProject(
+    chatPageId: string,
+    projectId: string,
+    projectTitle: string
+): Promise<void> {
+    const page = await fetchPage(chatPageId)
+    const current = projectRefs(page.properties ?? {})
+    if (linksToProject(current, projectId, projectTitle)) return
+
+    await setChatProjects(chatPageId, current.concat(projectId))
 }
 
 async function clearNonChildPageBlocks(blockId: string): Promise<void> {
@@ -543,14 +686,20 @@ async function clearNonChildPageBlocks(blockId: string): Promise<void> {
 /** Rewrites a context page's own text content with `text`, leaving any of its child pages untouched. */
 export async function updateContextPageContent(pageId: string, text: string): Promise<void> {
     await clearNonChildPageBlocks(pageId)
-    if (text.trim()) await setParagraphs(pageId, text)
+    if (text.trim()) await setMarkdownBlocks(pageId, text)
 }
 
 /** Creates a new child page under the project to hold one piece of context. */
 export async function createContextPage(projectId: string, title: string, text: string): Promise<string> {
     const id = await createChildPage(projectId, title || 'Untitled')
-    if (text.trim()) await setParagraphs(id, text)
+    if (text.trim()) await setMarkdownBlocks(id, text)
     return id
+}
+
+/** Removes a context page from the project by archiving it — it leaves the project and lands in
+    Notion's trash, so a mis-click is still recoverable there. */
+export async function deleteContextPage(pageId: string): Promise<void> {
+    await archiveChatPage(pageId)
 }
 
 export async function fetchProjectDetail(pageId: string): Promise<ProjectDetail> {
@@ -561,14 +710,21 @@ export async function fetchProjectDetail(pageId: string): Promise<ProjectDetail>
     const titleProp = page.properties?.title as { title?: NotionRichText[] } | undefined
 
     const blocks = await fetchBlockChildren(pageId)
-    const { instructions, color } = await fetchClaudeMd(blocks)
+    const { instructions, color, people: personIds } = await fetchClaudeMd(blocks)
     const contentBlocks = blocks.filter((b) => !isInstructionsPage(b))
     const title = plainText(titleProp?.title)
 
     const chatLog = await fetchChatLog()
     const chats = chatLog
-        .filter((c) => c.projects.includes(title))
+        .filter((c) => linksToProject(c.projectRefs, pageId, title))
         .map((c) => ({ id: c.id, name: c.name, sessionId: c.sessionId, lastEdited: c.lastEdited }))
+
+    /* Resolved against the People listing rather than fetched one page at a time — the ids are
+       stored, the names are not, and a person deleted in Notion simply drops off the list. */
+    const roster = personIds.length > 0 ? await fetchPeople() : []
+    const people = personIds
+        .map((id) => roster.find((person) => person.id === id))
+        .filter((person): person is PersonEntry => person !== undefined)
 
     return {
         id: pageId,
@@ -577,7 +733,8 @@ export async function fetchProjectDetail(pageId: string): Promise<ProjectDetail>
         instructions,
         color,
         blocks: contentBlocks.map(toDetailBlock).filter((b): b is ProjectDetailBlock => b !== null),
-        chats
+        chats,
+        people
     }
 }
 
@@ -616,13 +773,14 @@ export async function fetchProjectVersion(projectId: string): Promise<string> {
         fetchChatLog()
     ])
 
-    /* Chats record the project by title, not by id, so resolving the title is unavoidable here. */
+    /* Only for the chats still tagged by title rather than by id — `linksToProject` matches those
+       by name. */
     const title = plainText((page.properties?.title as { title?: NotionRichText[] } | undefined)?.title)
 
     const stamps = [
         page.last_edited_time ?? null,
         ...blocks.filter((b) => b.type === 'child_page').map((b) => b.last_edited_time ?? null),
-        ...chatLog.filter((c) => c.projects.includes(title)).map((c) => c.lastEdited)
+        ...chatLog.filter((c) => linksToProject(c.projectRefs, projectId, title)).map((c) => c.lastEdited)
     ].filter((t): t is string => Boolean(t))
 
     /* ISO-8601 UTC sorts correctly as a string, so no date parsing is needed. Empty for a project
@@ -697,60 +855,158 @@ async function replaceCodeBlock(pageId: string, language: string, text: string):
     if (!res.ok) throw new Error(`Notion code block create failed: ${res.status} ${await res.text()}`)
 }
 
-function isSystemMarkdownPage(block: NotionBlock): boolean {
-    return block.type === 'child_page' && block.child_page?.title?.trim().toLowerCase() === 'system.md'
-}
+/** Reads the Config page's JSON block.
 
-/** Reads the "SYSTEM.md" child page under the Config page — the instruction appended to every
-    chat's system prompt, ahead of any project context.
-
-    Creates the page seeded with the default the first time it is missing, so the instruction is
-    live from the start and editable in Notion from then on. Emptying the page afterwards is
-    honoured: only an absent page is seeded, never a blank one. */
-export async function fetchSystemMarkdown(): Promise<string> {
+    The whole configuration is one code block on that page, so this is a single request and adding a
+    setting means adding a key rather than creating another sub-page. A page with no code block on it
+    yet reads as empty config rather than being seeded — the block is written by hand, and inventing
+    one behind the user's back would fight them for ownership of it. */
+export async function fetchConfig(): Promise<AppConfig> {
     const blocks = await fetchBlockChildren(CONFIG_PAGE_ID)
-    const page = blocks.find(isSystemMarkdownPage)
+    const codeBlock = blocks.find((b) => b.type === 'code')
+    if (!codeBlock) return { ...EMPTY_CONFIG }
 
-    if (!page) {
-        await saveSystemMarkdown(DEFAULT_SYSTEM_PROMPT)
-        return DEFAULT_SYSTEM_PROMPT
+    const raw = plainText(codeBlock.code?.rich_text)
+    try {
+        return parseConfig(raw)
+    } catch (error) {
+        /* Named explicitly: a stray comma in Notion would otherwise surface as a chat that quietly
+           stopped applying its system prompt. */
+        throw new Error(`Config JSON on the Notion Config page is invalid: ${(error as Error).message}`)
     }
-
-    const children = await fetchBlockChildren(page.id)
-    const codeBlock = children.find((b) => b.type === 'code')
-    return codeBlock ? plainText(codeBlock.code?.rich_text) : ''
 }
 
-export async function saveSystemMarkdown(text: string): Promise<void> {
-    const blocks = await fetchBlockChildren(CONFIG_PAGE_ID)
-    const existing = blocks.find(isSystemMarkdownPage)
-    const pageId = existing ? existing.id : await createChildPage(CONFIG_PAGE_ID, 'SYSTEM.md')
-
-    await replaceCodeBlock(pageId, 'markdown', text)
+/** Rewrites that block wholesale. Callers pass the complete config, so a field they did not touch
+    keeps whatever they read a moment ago rather than being dropped. */
+export async function saveConfig(config: AppConfig): Promise<void> {
+    await replaceCodeBlock(CONFIG_PAGE_ID, 'json', serializeConfig(config))
 }
 
-function isTitleMarkdownPage(block: NotionBlock): boolean {
-    return block.type === 'child_page' && block.child_page?.title?.trim().toLowerCase() === 'title.md'
+/* One page per skill under the Skills page, each holding a single JSON code block — the same shape
+   as the Config block, a field per setting. The page title is the skill's name and the only part
+   that lives outside the JSON, because that is what Notion shows in a page list. */
+
+function readSkillData(blocks: NotionBlock[]): SkillData {
+    const codeBlock = blocks.find((b) => b.type === 'code')
+    return codeBlock ? parseSkillData(plainText(codeBlock.code?.rich_text)) : { ...EMPTY_SKILL_DATA }
 }
 
-/** Reads the "TITLE.md" child page under the Config page — empty string if it doesn't exist yet. */
-export async function fetchTitleMarkdown(): Promise<string> {
-    const blocks = await fetchBlockChildren(CONFIG_PAGE_ID)
-    const page = blocks.find(isTitleMarkdownPage)
-    if (!page) return ''
+/** Every skill, bodies included.
 
-    const children = await fetchBlockChildren(page.id)
-    const codeBlock = children.find((b) => b.type === 'code')
-    return codeBlock ? plainText(codeBlock.code?.rich_text) : ''
+    The bodies come along rather than being fetched on demand: a one-shot skill is invoked by typing
+    its name and must be in the prompt the moment the message is sent, with no round trip to Notion
+    in between. Skills are instructions, so they are small enough to hold. */
+export async function fetchSkills(): Promise<Skill[]> {
+    const blocks = await fetchBlockChildren(SKILLS_PAGE_ID)
+    const pages = blocks.filter((b) => b.type === 'child_page')
+
+    return Promise.all(
+        pages.map(async (page) => ({
+            id: page.id,
+            name: page.child_page?.title ?? '',
+            ...readSkillData(await fetchBlockChildren(page.id))
+        }))
+    )
 }
 
-/** Rewrites the "TITLE.md" child page under the Config page with `text`, creating the page first if needed. */
-export async function saveTitleMarkdown(text: string): Promise<void> {
-    const blocks = await fetchBlockChildren(CONFIG_PAGE_ID)
-    const existing = blocks.find(isTitleMarkdownPage)
-    const pageId = existing ? existing.id : await createChildPage(CONFIG_PAGE_ID, 'TITLE.md')
+/** One skill, read fresh.
 
-    await replaceCodeBlock(pageId, 'markdown', text)
+    The list already carries bodies, but a skill open in the editor is re-read on selection so it
+    shows what Notion holds now rather than what was loaded at startup — the same way a project
+    fetches its detail when opened. */
+export async function fetchSkill(pageId: string): Promise<Skill> {
+    const [page, blocks] = await Promise.all([fetchPage(pageId), fetchBlockChildren(pageId)])
+    const titleProp = page.properties?.title as { title?: NotionRichText[] } | undefined
+
+    return { id: pageId, name: plainText(titleProp?.title), ...readSkillData(blocks) }
+}
+
+/** Creates the page and its block, so a new skill opens ready to edit rather than empty. */
+export async function createSkill(name: string): Promise<string> {
+    const pageId = await createChildPage(SKILLS_PAGE_ID, name)
+    await saveSkill(pageId, { ...EMPTY_SKILL_DATA })
+    return pageId
+}
+
+export async function saveSkill(pageId: string, skill: SkillData): Promise<void> {
+    await replaceCodeBlock(pageId, 'json', serializeSkillData(skill))
+}
+
+/** Renaming a skill is renaming its page — the title is the name, and what `/` matches.
+
+    Not `updatePageTitle`: that one writes the `Name` property, which is what the chat database's
+    rows call their title. A child page under a page has no such property; its title is the one
+    called `title`, and patching the wrong key fails the whole request. */
+export async function renameSkill(pageId: string, name: string): Promise<void> {
+    const res = await fetch(`https://api.notion.com/v1/pages/${pageId}`, {
+        method: 'PATCH',
+        headers: headers(),
+        body: JSON.stringify({
+            properties: { title: { title: [{ type: 'text', text: { content: name } }] } }
+        })
+    })
+
+    if (!res.ok) throw new Error(`Notion skill rename failed: ${res.status} ${await res.text()}`)
+}
+
+export async function archiveSkill(pageId: string): Promise<void> {
+    await archiveChatPage(pageId)
+}
+
+/* One page per person under the People page. Unlike a project there is nothing to configure — a
+   person is the Notion page and nothing else, so the app only lists them and shows what the page
+   says. Editing happens in Notion. */
+
+export interface PersonEntry {
+    id: string
+    name: string
+}
+
+export interface PersonDetail extends PersonEntry {
+    blocks: ProjectDetailBlock[]
+    lastEdited: string | null
+}
+
+/** The list for the sidebar: names only, so opening the section costs one request. */
+export async function fetchPeople(): Promise<PersonEntry[]> {
+    const blocks = await fetchBlockChildren(PEOPLE_PAGE_ID)
+
+    return blocks
+        .filter((b) => b.type === 'child_page')
+        .map((b) => ({ id: b.id, name: b.child_page?.title ?? '' }))
+}
+
+/** One person's page, read fresh on selection the way a project's detail is. */
+export async function fetchPerson(pageId: string): Promise<PersonDetail> {
+    const [page, blocks] = await Promise.all([fetchPage(pageId), fetchBlockChildren(pageId)])
+    const titleProp = page.properties?.title as { title?: NotionRichText[] } | undefined
+
+    return {
+        id: pageId,
+        name: plainText(titleProp?.title),
+        lastEdited: page.last_edited_time ?? null,
+        blocks: blocks.map(toDetailBlock).filter((b): b is ProjectDetailBlock => b !== null)
+    }
+}
+
+export async function createPerson(name: string): Promise<string> {
+    return createChildPage(PEOPLE_PAGE_ID, name)
+}
+
+/** Rewrites a person's page body, the same way a project's context page is written: the existing
+    blocks are cleared and the text laid back down as paragraphs. Anything richer than a paragraph
+    is flattened, which is why this only runs when the page has actually been edited here. */
+export async function updatePersonContent(pageId: string, text: string): Promise<void> {
+    await clearNonChildPageBlocks(pageId)
+    if (text.trim()) await setMarkdownBlocks(pageId, text)
+}
+
+export async function renamePerson(pageId: string, name: string): Promise<void> {
+    await renameSkill(pageId, name)
+}
+
+export async function archivePerson(pageId: string): Promise<void> {
+    await archiveChatPage(pageId)
 }
 
 /** Appends a single paragraph block holding `text` to the project page. */

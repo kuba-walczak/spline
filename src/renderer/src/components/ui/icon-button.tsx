@@ -60,11 +60,17 @@ export function IconButton({
         borderRadius: 'var(--radius-md)',
         cursor: 'pointer',
         transition: 'var(--transition-control)',
-        background: variant === 'filled' ? 'var(--surface-control)' : 'transparent',
+        /* Ghost rest is #30302F at alpha 0, not `transparent` — that keyword is black at alpha 0,
+           so the fade would interpolate through a dark flash instead of just appearing. */
+        background:
+          variant === 'filled'
+            ? hovered || active
+              ? 'var(--surface-control-hover)'
+              : 'var(--surface-control)'
+            : hovered || active
+              ? '#30302F'
+              : '#30302F00',
         color: 'var(--text-primary)',
-        ...(hovered || active
-          ? { background: variant === 'filled' ? 'var(--surface-control-hover)' : 'var(--surface-hover)' }
-          : null),
         ...(disabled ? { opacity: 0.4, cursor: 'not-allowed' } : null),
         ...style
       }}

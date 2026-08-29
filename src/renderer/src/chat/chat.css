@@ -26,11 +26,29 @@ a:hover {
 .chatscroll::-webkit-scrollbar-track {
   background: transparent;
 }
+/* Styling the scrollbar makes the resize grabber and the corner between the bars paint with the
+   engine's own default rather than the field's background. Both are cleared so a textarea's own
+   surface shows through, wherever it is used. */
+.chatscroll::-webkit-resizer,
+.chatscroll::-webkit-scrollbar-corner {
+  background: transparent;
+}
 .chatscroll::-webkit-scrollbar-thumb {
   background: #313130;
   border-radius: 8px;
   border: 3px solid transparent;
   background-clip: content-box;
+}
+
+.chipscroll {
+  scrollbar-width: none;
+}
+/* The attachment box is 38px tall and its chips are 28 — a default horizontal scrollbar eats the
+   bottom third of every chip and takes the clicks meant for them. The box still scrolls by wheel
+   and drag; only the bar is gone. */
+.chipscroll::-webkit-scrollbar {
+  height: 0;
+  width: 0;
 }
 
 /* The composer shell already reads as the input; suppress the global focus ring. */
@@ -39,25 +57,6 @@ a:hover {
   box-shadow: none;
 }
 
-/* Project detail — main column tops out at 720px, the rail at 350px; below 700px
-   they stack into one column. */
-.pdgrid {
-  display: grid;
-  grid-template-columns: minmax(320px, 720px) minmax(260px, 350px);
-  gap: 44px;
-  align-items: start;
-}
-@media (max-width: 1180px) {
-  .pdgrid {
-    gap: 28px;
-  }
-}
-@media (max-width: 700px) {
-  .pdgrid {
-    grid-template-columns: minmax(0, 1fr);
-    gap: 24px;
-  }
-}
 .pdrow:hover {
   background: var(--surface-hover);
 }

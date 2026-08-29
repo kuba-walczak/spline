@@ -4,6 +4,7 @@ import { homedir } from 'node:os'
 import { app } from 'electron'
 import { stripInjectedBlocks } from '../../shared/injection'
 import { outcomeFromToolResult, type ToolOutcome } from '../../shared/toolResults'
+import { usageFromRecord } from '../../shared/tokenUsage'
 
 /* Reads a chat back from the CLI's own session transcript.
 
@@ -64,7 +65,7 @@ interface TranscriptLine {
     timestamp?: string
     isSidechain?: boolean
     leafUuid?: string
-    message?: { content?: ContentBlock[] | string }
+    message?: { content?: ContentBlock[] | string; usage?: Record<string, unknown> }
 }
 
 /** Reduces a tool's input object down to just its values — no field names or braces. */
@@ -135,6 +136,40 @@ function mergeParts(parts: TranscriptPart[], incoming: TranscriptPart[]): Transc
         else merged.push(part)
     }
     return merged
+}
+
+/** How much context this session was holding when it last replied, or `null` for a session that
+    has not replied yet — or whose file the CLI has already cleaned up.
+
+    The transcript records the API's own `usage` block on every assistant line, so a resumed chat
+    can show its context meter immediately instead of waiting for the first reply of the new run to
+    report one. It is last run's number: the prefix is rebuilt at spawn from whatever flags apply
+    now, so a model, effort or project change moves it. The first reply corrects it.
+
+    Read in file order rather than by walking the reply chain, and sidechains skipped — a subagent's
+    turn carries its own usage, and seeding the chat with that would read as a context that shrank. */
+export function readSessionContextTokens(sessionId: string): number | null {
+    const path = sessionFilePath(sessionId)
+    if (!existsSync(path)) return null
+
+    let latest: number | null = null
+    for (const raw of readFileSync(path, 'utf8').split('\n')) {
+        if (!raw.trim()) continue
+
+        let line: TranscriptLine
+        try {
+            line = JSON.parse(raw) as TranscriptLine
+        } catch {
+            continue
+        }
+
+        if (line.type !== 'assistant' || line.isSidechain) continue
+
+        const usage = usageFromRecord(line.message?.usage)
+        if (usage) latest = usage.total
+    }
+
+    return latest
 }
 
 /** Rebuilds a conversation from its session transcript. Empty when the session file is gone —
