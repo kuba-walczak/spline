@@ -1,15 +1,19 @@
 import { useEffect, useState } from 'react'
 import type { CSSProperties, ReactElement } from 'react'
 import { IconButton } from '@/components/ui/icon-button'
-import { Skeleton, SkeletonLines } from '@/components/ui/skeleton'
+import { Skeleton } from '@/components/ui/skeleton'
 import { blocksToMarkdown } from '@shared/markdown'
 
-/* One person, which is one Notion page and nothing else.
+/* One person: a row in the People table and the page under it.
 
-   Read as rendered blocks, and written the way a project's context page is: an edit button swaps the
-   rendering for a textarea, and syncing lays the text back down as paragraphs. Editing is behind
-   that button rather than always on because saving flattens anything richer than a paragraph — a
-   page written in Notion with headings and lists should not lose them just by being looked at.
+   Laid out the way a skill is, because a person is now the same shape — a name, a column beside it,
+   and a body. The name and the affiliation are the row's columns; the description is the page, read
+   as markdown and written back the same way.
+
+   Editing is always on, as it is for a skill, rather than behind a pencil. Nothing is written until
+   Sync, and `dirty` compares the drafts against what Notion gave us — so opening a person and
+   reading them writes nothing, and the flattening that a save does to anything richer than the
+   markdown carries only happens when you actually meant to save.
 
    Re-read on every selection, so an edit made in Notion shows up without restarting the app. */
 
@@ -24,17 +28,9 @@ interface PersonBlock {
 interface PersonDetail {
   id: string
   name: string
+  affiliation: string
   lastEdited: string | null
   blocks: PersonBlock[]
-}
-
-const bodyStyle: CSSProperties = {
-  margin: 0,
-  font: 'var(--type-body)',
-  color: 'var(--text-body)',
-  letterSpacing: 'var(--tracking-tight)',
-  whiteSpace: 'pre-wrap',
-  overflowWrap: 'anywhere'
 }
 
 const headingStyle: CSSProperties = {
@@ -44,8 +40,30 @@ const headingStyle: CSSProperties = {
   letterSpacing: 'var(--tracking-tight)'
 }
 
-const HEADINGS = new Set(['heading_1', 'heading_2', 'heading_3'])
-const LIST_ITEMS = new Set(['bulleted_list_item', 'numbered_list_item', 'to_do'])
+const fieldStyle: CSSProperties = {
+  width: '100%',
+  boxSizing: 'border-box',
+  padding: '10px 12px',
+  background: 'var(--surface-inset)',
+  border: '1px solid var(--border-default)',
+  borderRadius: 'var(--radius-md)',
+  color: 'var(--text-body)',
+  font: 'var(--weight-regular) var(--text-base)/1.5 var(--font-sans)',
+  outline: 'none',
+  /* The global `*:focus-visible` ring reads as a highlight around a field that already has its own
+     border, so it is suppressed here the way the composer's input suppresses it. */
+  boxShadow: 'none'
+}
+
+/** Shared by the two fields on the split row, so they sit level. */
+const FIELD_HEIGHT = 42
+
+const noteStyle: CSSProperties = {
+  margin: '0 0 12px',
+  font: 'var(--weight-regular) var(--text-base)/1.45 var(--font-sans)',
+  letterSpacing: 'var(--tracking-tight)',
+  color: 'var(--text-muted)'
+}
 
 export interface PersonDetailViewProps {
   personId: string
@@ -66,10 +84,17 @@ export function PersonDetailView({
   const [loading, setLoading] = useState(true)
   const [failed, setFailed] = useState(false)
 
-  const [editing, setEditing] = useState(false)
-  const [nameDraft, setNameDraft] = useState('')
-  const [bodyDraft, setBodyDraft] = useState('')
+  const [name, setName] = useState('')
+  const [affiliation, setAffiliation] = useState('')
+  const [body, setBody] = useState('')
   const [saving, setSaving] = useState(false)
+
+  /* Markdown, so structure survives the round trip: a heading edited here is written back as a
+     heading. Images are in it as `![caption](url)`, since the draft is the whole of what the page is
+     rewritten from and anything missing from it is deleted on save. Child pages are left out — a
+     page inside this one is not part of its body. */
+  const toMarkdown = (loaded: PersonDetail): string =>
+    blocksToMarkdown(loaded.blocks.filter((b) => b.type !== 'child_page'))
 
   useEffect(() => {
     let cancelled = false
@@ -81,7 +106,9 @@ export function PersonDetailView({
       .then((loaded) => {
         if (cancelled) return
         setPerson(loaded)
-        setEditing(false)
+        setName(loaded.name)
+        setAffiliation(loaded.affiliation)
+        setBody(toMarkdown(loaded))
       })
       .catch((error) => {
         console.error('[people] getPerson failed:', error)
@@ -97,36 +124,42 @@ export function PersonDetailView({
   }, [personId])
 
   const title = person?.name || fallbackName || 'Untitled'
-  const blocks = person?.blocks ?? []
+  const ready = person !== null && !loading && !failed
+  const originalBody = person ? toMarkdown(person) : ''
+  const dirty =
+    ready && (name !== person.name || affiliation !== person.affiliation || body !== originalBody)
 
-  /* Markdown, so structure survives the round trip: a heading edited here is written back as a
-     heading. Images and child pages have no spelling and are left out — they are not prose, and
-     round-tripping them through a textarea would delete them. */
-  const originalBody = blocksToMarkdown(blocks.filter((b) => b.type !== 'child_page' && b.type !== 'image'))
-
-  const dirty = editing && (nameDraft !== (person?.name ?? '') || bodyDraft !== originalBody)
-
-  function startEditing(): void {
-    setNameDraft(person?.name ?? '')
-    setBodyDraft(originalBody)
-    setEditing(true)
-  }
-
-  async function sync(): Promise<void> {
-    if (saving || !person) return
+  async function save(): Promise<void> {
+    if (saving || !dirty || !person) return
     setSaving(true)
     try {
-      if (nameDraft !== person.name) await window.api.renamePerson(personId, nameDraft)
-      if (bodyDraft !== originalBody) await window.api.updatePersonContent(personId, bodyDraft)
+      if (name !== person.name) await window.api.renamePerson(personId, name)
+      if (affiliation !== person.affiliation) {
+        await window.api.updatePersonAffiliation(personId, affiliation)
+      }
+      if (body !== originalBody) await window.api.updatePersonContent(personId, body)
+
+      /* Re-read rather than patching what we held: the body comes back as Notion actually laid it
+         down, which is what the next dirty check has to compare against. */
       const reloaded = await window.api.getPerson(personId)
       setPerson(reloaded)
-      setEditing(false)
+      setName(reloaded.name)
+      setAffiliation(reloaded.affiliation)
+      setBody(toMarkdown(reloaded))
       onSaved()
     } catch (error) {
       console.error('[people] save failed:', error)
     } finally {
       setSaving(false)
     }
+  }
+
+  /** Throws the unsynced edits away, back to what Notion last gave us. */
+  function discard(): void {
+    if (!person) return
+    setName(person.name)
+    setAffiliation(person.affiliation)
+    setBody(toMarkdown(person))
   }
 
   return (
@@ -171,194 +204,143 @@ export function PersonDetailView({
         <div
           style={{
             width: '100%',
+            /* The same content width the project and skill views use, so the sections line up when
+               you move between them. */
             maxWidth: 1114,
             margin: '0 auto',
             padding: '38px 28px 64px',
             boxSizing: 'border-box'
           }}
         >
+          {/* Title centred in the column, with the actions pinned to the right rather than sharing a
+              flex row — a space-between row would shift the title sideways as buttons appear. */}
           <div
             style={{
+              position: 'relative',
               display: 'flex',
               alignItems: 'center',
-              justifyContent: 'space-between',
-              gap: '16px',
+              justifyContent: 'center',
+              minHeight: 44,
               margin: '0 0 var(--space-10)'
             }}
           >
-            {editing ? (
-              <input
-                value={nameDraft}
-                onChange={(e) => setNameDraft(e.target.value)}
-                style={{
-                  flex: '1 1 auto',
-                  minWidth: 0,
-                  boxSizing: 'border-box',
-                  padding: '2px 0',
-                  background: 'transparent',
-                  border: 'none',
-                  borderBottom: '1px solid var(--border-default)',
-                  color: 'var(--text-primary)',
-                  font: 'var(--type-title)',
-                  letterSpacing: 'var(--tracking-display)',
-                  outline: 'none',
-                  boxShadow: 'none'
-                }}
-              />
-            ) : (
-              <h1
-                style={{
-                  margin: 0,
-                  flex: '1 1 auto',
-                  minWidth: 0,
-                  font: 'var(--type-title)',
-                  color: 'var(--text-primary)',
-                  letterSpacing: 'var(--tracking-display)'
-                }}
-              >
-                {/* The name loads with the page, so it waits with it. The list's copy is already
-                    known and could be shown straight away, but then the heading would sit finished
-                    above a skeleton body and the page would look half-broken rather than loading. */}
-                {loading ? <Skeleton height={38} width="42%" /> : title}
-              </h1>
-            )}
-            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)', flex: '0 0 auto' }}>
+            <h1
+              style={{
+                margin: 0,
+                font: 'var(--type-display)',
+                color: 'var(--text-primary)',
+                letterSpacing: 'var(--tracking-display)',
+                textAlign: 'center'
+              }}
+            >
+              {title}
+            </h1>
+            <div
+              style={{
+                position: 'absolute',
+                right: 0,
+                top: '50%',
+                transform: 'translateY(-50%)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 'var(--space-2)'
+              }}
+            >
               {dirty ? (
-                <IconButton
-                  icon="refresh-cw"
-                  label="Sync to Notion"
-                  size="sm"
-                  onClick={() => void sync()}
-                  disabled={saving}
-                />
+                <>
+                  <IconButton
+                    icon="refresh-cw"
+                    label="Sync to Notion"
+                    size="sm"
+                    onClick={() => void save()}
+                    disabled={saving}
+                  />
+                  <IconButton
+                    icon="x"
+                    label="Discard changes"
+                    size="sm"
+                    onClick={discard}
+                    disabled={saving}
+                  />
+                </>
               ) : null}
-              <IconButton
-                icon="pencil"
-                label={editing ? 'Cancel edit' : 'Edit page'}
-                size="sm"
-                active={editing}
-                disabled={loading || failed}
-                onClick={() => (editing ? setEditing(false) : startEditing())}
-              />
             </div>
           </div>
 
-          <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
-            {loading ? (
-              <>
-                <SkeletonLines lines={4} />
-                <Skeleton height={18} width="40%" delay={0.3} />
-                <SkeletonLines lines={3} delay={0.36} />
-              </>
-            ) : failed ? (
-              <span style={{ ...bodyStyle, color: 'var(--text-faint)' }}>
-                Couldn&apos;t load this page.
-              </span>
-            ) : editing ? (
-              <textarea
-                className="chatscroll"
-                value={bodyDraft}
-                onChange={(e) => setBodyDraft(e.target.value)}
-                autoFocus
-                style={{
-                  width: '100%',
-                  boxSizing: 'border-box',
-                  minHeight: 320,
-                  padding: 'var(--space-5)',
-                  resize: 'vertical',
-                  background: 'var(--surface-inset)',
-                  border: '1px solid var(--border-default)',
-                  borderRadius: 'var(--radius-md)',
-                  color: 'var(--text-body)',
-                  font: 'var(--type-body)',
-                  letterSpacing: 'var(--tracking-tight)',
-                  outline: 'none',
-                  boxShadow: 'none'
-                }}
-              />
-            ) : blocks.length === 0 ? (
-              <span style={{ ...bodyStyle, color: 'var(--text-faint)' }}>
-                This page is empty. Write it in Notion.
-              </span>
-            ) : (
-              blocks.map((block) => {
-                if (block.type === 'image' && block.url) {
-                  return (
-                    <img
-                      key={block.id}
-                      src={block.url}
-                      alt={block.text || ''}
-                      style={{ maxWidth: '100%', borderRadius: 'var(--radius-md)', display: 'block' }}
-                    />
-                  )
-                }
+          {/* One panelled card, hairline-divided, after the skill view's: name and affiliation share
+              the first row — the two columns the row carries — then the page itself below them. */}
+          <aside
+            style={{
+              boxSizing: 'border-box',
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-lg)',
+              background: 'transparent',
+              overflow: 'hidden'
+            }}
+          >
+            {/* Two equal halves with a full-height rule between them. A grid rather than flex with a
+                border: the `1px` track stretches to the taller half on its own, and the padding sits
+                on each half so the rule reaches the panel's edges. */}
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: '1fr 1px 1fr',
+                borderBottom: '1px solid var(--border-default)'
+              }}
+            >
+              <div style={{ padding: 'var(--space-7)', minWidth: 0 }}>
+                <h3 style={{ ...headingStyle, marginBottom: 'var(--space-3)' }}>Name</h3>
+                {loading ? (
+                  <Skeleton height={FIELD_HEIGHT} radius="var(--radius-md)" />
+                ) : (
+                  <input
+                    value={name}
+                    onChange={(e) => setName(e.target.value)}
+                    disabled={failed}
+                    style={{ ...fieldStyle, height: FIELD_HEIGHT }}
+                  />
+                )}
+              </div>
 
-                if (block.type === 'divider') {
-                  return <hr key={block.id} style={{ border: 'none', borderTop: '1px solid var(--border-default)', margin: 0 }} />
-                }
+              <div style={{ background: 'var(--border-default)' }} />
 
-                if (HEADINGS.has(block.type)) {
-                  return (
-                    <h3 key={block.id} style={headingStyle}>
-                      {block.text}
-                    </h3>
-                  )
-                }
+              <div style={{ padding: 'var(--space-7)', minWidth: 0 }}>
+                <h3 style={{ ...headingStyle, marginBottom: 'var(--space-3)' }}>Affiliation</h3>
+                {loading ? (
+                  <Skeleton height={FIELD_HEIGHT} radius="var(--radius-md)" delay={0.08} />
+                ) : (
+                  <input
+                    value={affiliation}
+                    onChange={(e) => setAffiliation(e.target.value)}
+                    disabled={failed}
+                    style={{ ...fieldStyle, height: FIELD_HEIGHT }}
+                  />
+                )}
+              </div>
+            </div>
 
-                if (LIST_ITEMS.has(block.type)) {
-                  const marker = block.type === 'to_do' ? (block.checked ? '☑' : '☐') : '•'
-                  return (
-                    <p key={block.id} style={{ ...bodyStyle, paddingLeft: 'var(--space-6)' }}>
-                      {marker} {block.text}
-                    </p>
-                  )
-                }
+            <div style={{ padding: 'var(--space-7)' }}>
+              <h3 style={{ ...headingStyle, marginBottom: 'var(--space-3)' }}>Description</h3>
+              {loading ? (
+                <Skeleton height={260} radius="var(--radius-md)" delay={0.24} />
+              ) : (
+                <textarea
+                  className="chatscroll"
+                  value={body}
+                  onChange={(e) => setBody(e.target.value)}
+                  disabled={failed}
+                  placeholder="What is worth knowing about them. Written in Notion or here."
+                  style={{ ...fieldStyle, minHeight: '260px', resize: 'vertical' }}
+                />
+              )}
+            </div>
+          </aside>
 
-                if (block.type === 'code') {
-                  return (
-                    <pre
-                      key={block.id}
-                      style={{
-                        margin: 0,
-                        padding: '14px 16px',
-                        background: 'var(--surface-inset)',
-                        border: '1px solid var(--border-default)',
-                        borderRadius: 'var(--radius-md)',
-                        font: 'var(--weight-regular) var(--text-base)/1.5 var(--font-mono)',
-                        color: 'var(--text-body)',
-                        whiteSpace: 'pre-wrap',
-                        overflowWrap: 'anywhere'
-                      }}
-                    >
-                      {block.text}
-                    </pre>
-                  )
-                }
-
-                if (block.type === 'quote') {
-                  return (
-                    <p
-                      key={block.id}
-                      style={{
-                        ...bodyStyle,
-                        paddingLeft: 'var(--space-6)',
-                        borderLeft: '2px solid var(--border-default)',
-                        color: 'var(--text-muted)'
-                      }}
-                    >
-                      {block.text}
-                    </p>
-                  )
-                }
-
-                return (
-                  <p key={block.id} style={bodyStyle}>
-                    {block.text}
-                  </p>
-                )
-              })
-            )}
-          </div>
+          {failed ? (
+            <p style={{ ...noteStyle, marginTop: 'var(--space-6)', color: 'var(--text-faint)' }}>
+              Could not read this person from Notion.
+            </p>
+          ) : null}
         </div>
       </div>
     </main>

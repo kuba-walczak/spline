@@ -1,7 +1,8 @@
-/* Skills: reusable instructions the user turns on, stored one page each under the Skills page.
+/* Skills: reusable instructions the user turns on, stored one row each in the Skills database.
 
-   A skill page holds a single JSON code block carrying everything about it except the name, which
-   is the page title. Same shape as the Config block — one document per page, a field per setting.
+   The name is the row's title and the mode is a column. The body is the page itself, written as
+   ordinary Notion blocks — so a skill reads and edits in Notion as the document it is, rather than
+   as a string inside a JSON block.
 
    Nothing about a skill reaches the model unless the user asks for it. There is no catalogue in the
    system prompt and nothing offered for the model to choose from: a persistent skill is in the
@@ -12,7 +13,7 @@
     `oneshot` applies to the single message that named it, and rides in that turn. */
 export type SkillMode = 'persistent' | 'oneshot'
 
-/** Everything the JSON block holds. */
+/** Everything about a skill except its name. */
 export interface SkillData {
     mode: SkillMode
     /** What the model is told when the skill applies. */
@@ -25,34 +26,9 @@ export interface Skill extends SkillData {
     name: string
 }
 
+/** What a new skill starts as. One-shot is the safer default: a persistent skill switched on by
+    accident would attach itself to every turn of a chat with nothing to explain why. */
 export const EMPTY_SKILL_DATA: SkillData = { mode: 'oneshot', body: '' }
-
-/** Reads a skill page's JSON block. A block that will not parse, or one missing `mode`, falls back
-    to a one-shot skill — the safer default, since a broken persistent skill would otherwise attach
-    itself to every turn of a chat with nothing to explain why. */
-export function parseSkillData(raw: string): SkillData {
-    if (!raw.trim()) return { ...EMPTY_SKILL_DATA }
-
-    let parsed: unknown
-    try {
-        parsed = JSON.parse(raw)
-    } catch {
-        return { ...EMPTY_SKILL_DATA }
-    }
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return { ...EMPTY_SKILL_DATA }
-
-    const record = parsed as Record<string, unknown>
-
-    return {
-        mode: record.mode === 'persistent' ? 'persistent' : 'oneshot',
-        body: typeof record.body === 'string' ? record.body : ''
-    }
-}
-
-/** Serializes back, indented, since a person may edit this block by hand in Notion. */
-export function serializeSkillData(data: SkillData): string {
-    return JSON.stringify(data, null, 2)
-}
 
 function escapeName(name: string): string {
     return name.replace(/&/g, '&amp;').replace(/"/g, '&quot;')

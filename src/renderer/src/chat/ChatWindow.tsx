@@ -18,6 +18,7 @@ import { isNotionId, normalizeNotionId, sameNotionId } from '@shared/notionId'
 import { buildSkillsPrompt, renderSkillInvocation, type Skill } from '@shared/skills'
 import SkillDetailView from './SkillDetailView'
 import PersonDetailView from './PersonDetailView'
+import PageDetailView from './PageDetailView'
 import { outcomeFromToolResult, type ToolOutcome } from '@shared/toolResults'
 import type { SessionStatus } from './Sidebar'
 
@@ -110,9 +111,9 @@ interface Project {
 const UNTITLED = 'New chat'
 
 const MODELS = [
-  { id: 'opus', name: 'Opus 5', description: 'Most capable model for complex challenges' },
-  { id: 'sonnet', name: 'Sonnet 5', description: 'Most efficient for everyday tasks' },
-  { id: 'haiku', name: 'Haiku 4.5', description: 'Fastest for daily tasks' }
+  { id: 'opus', name: 'Opus 5' },
+  { id: 'sonnet', name: 'Sonnet 5' },
+  { id: 'haiku', name: 'Haiku 4.5' }
 ]
 
 const EFFORTS = [
@@ -574,6 +575,8 @@ export default function ChatWindow({
   const [skills, setSkills] = useState<Skill[]>([])
   const [activeSkillId, setActiveSkillId] = useState<string | null>(null)
   const [people, setPeople] = useState<Array<{ id: string; name: string }>>([])
+  const [pages, setPages] = useState<Array<{ id: string; title: string }>>([])
+  const [activePageId, setActivePageId] = useState<string | null>(null)
   const [activePersonId, setActivePersonId] = useState<string | null>(null)
   /* Chosen in the composer, applied to the next message only. */
   const [pendingSkill, setPendingSkill] = useState<Skill | null>(null)
@@ -626,6 +629,10 @@ export default function ChatWindow({
   const scrollRef = useRef<HTMLDivElement | null>(null)
   const lastMessageRef = useRef<HTMLDivElement | null>(null)
   const spacerRef = useRef<HTMLDivElement | null>(null)
+  /** Opening a chat (or staying near the composer) pins the viewport to the newest message. Scrolling
+      up to read history clears this so later layout — images, wrapping, streamed tokens — does not
+      yank the view back down. */
+  const stickToBottom = useRef(true)
   const [fadeEdges, setFadeEdges] = useState({ top: false, bottom: false })
 
   const SIDEBAR_MIN = 200
@@ -662,6 +669,28 @@ export default function ChatWindow({
     const top = el.scrollTop > 4
     const bottom = el.scrollTop + el.clientHeight < el.scrollHeight - 4
     setFadeEdges((prev) => (prev.top === top && prev.bottom === bottom ? prev : { top, bottom }))
+  }
+
+  function pinScroll(): void {
+    const el = scrollRef.current
+    const lastEl = lastMessageRef.current
+    const spacerEl = spacerRef.current
+    if (!el) return
+    if (spacerEl) {
+      const lastHeight = lastEl?.offsetHeight ?? 0
+      const spacer = Math.max(0, Math.round((el.clientHeight - lastHeight) / 2))
+      const next = `${spacer}px`
+      if (spacerEl.style.height !== next) spacerEl.style.height = next
+    }
+    if (stickToBottom.current) el.scrollTop = el.scrollHeight
+    updateFadeEdges()
+  }
+
+  function onChatScroll(): void {
+    const el = scrollRef.current
+    if (!el) return
+    stickToBottom.current = el.scrollHeight - el.scrollTop - el.clientHeight <= 8
+    updateFadeEdges()
   }
 
   /** Only fades the edge that actually has more content scrolled past it — a short
@@ -714,9 +743,11 @@ export default function ChatWindow({
                 model: entry.model ?? DEFAULT_MODEL_ID,
                 effort: entry.effort ?? DEFAULT_EFFORT_ID,
                 sourceId: entry.id,
-                /* Replaces rather than merges: the row is the authoritative set, and a project
-                   detached from the chat has to stay detached. */
-                referencedProjectRefs: entry.projectRefs,
+                /* From the map rather than the row: membership is recorded on the project now, and
+                   the row's old tags are only a fallback until they are migrated away. Replaces
+                   rather than merges — a project detached from the chat has to stay detached. */
+                referencedProjectRefs:
+                  chatProjectMap.current[normalizeNotionId(entry.id)] ?? entry.projectRefs,
                 lastActive: entry.lastActive,
                 systemPrompt: existing?.systemPrompt,
                 contextVersions: existing?.contextVersions
@@ -725,6 +756,34 @@ export default function ChatWindow({
         })
       })
       .catch((error) => console.error('[chat] getChatLog failed:', error))
+  }
+
+  /* Which projects each chat is in. The chats no longer carry that — the projects do — so it is
+     read once by looking in them and held here, rather than asked per chat. Refreshed whenever the
+     chat log is, which is also whenever an attachment changes. */
+  const chatProjectMap = useRef<Record<string, string[]>>({})
+  /* The same answer in state, for the rows that read it at render time rather than carrying it on
+     themselves: a person's row has nowhere to keep it, where a chat's conversation object does. */
+  const [projectMap, setProjectMap] = useState<Record<string, string[]>>({})
+
+  function refreshChatProjectMap(): void {
+    window.api
+      .getContextProjectMap()
+      .then((map) => {
+        chatProjectMap.current = map
+        setProjectMap(map)
+        /* Both lists: a chat read from Notion and not yet opened here lives in `notionChats`, which
+           is most of them, and updating only the local ones left every sidebar row without its
+           project. */
+        const apply = (prev: Conversation[]): Conversation[] =>
+          prev.map((c) =>
+            c.sourceId ? { ...c, referencedProjectRefs: map[normalizeNotionId(c.sourceId)] ?? [] } : c
+          )
+
+        setNotionChats(apply)
+        setConversations(apply)
+      })
+      .catch((error) => console.error('[chat] getContextProjectMap failed:', error))
   }
 
   function refreshProjects(): void {
@@ -752,23 +811,28 @@ export default function ChatWindow({
   useEffect(() => {
     refreshChatLog()
     refreshProjects()
+    /* Costs a request per project, so it runs alongside the first load rather than blocking it: the
+       chat list appears at once and its project chips fill in a moment later. */
+    refreshChatProjectMap()
   }, [])
 
-  /* Chats used to be tagged with a project's title, and a title stops matching the moment the
-     project is renamed in Notion. Rewriting those rows to hold ids instead is what makes a rename
-     safe, so it runs once per launch as soon as the project list is in — and does nothing at all
-     once every row has been converted. */
-  const migratedProjectRefs = useRef(false)
+  /* The old membership records — a project id tagged on a chat's row, the people list in a project's
+     CLAUDE.md, a folder's JSON block — are converted to links on the pages they describe, once per
+     launch. Does nothing at all once there is nothing left to convert. */
+  const migratedMembership = useRef(false)
   useEffect(() => {
-    if (projects.length === 0 || migratedProjectRefs.current) return
-    migratedProjectRefs.current = true
+    if (projects.length === 0 || migratedMembership.current) return
+    migratedMembership.current = true
 
     void window.api
-      .migrateChatProjectRefs(projects.map((p) => ({ id: p.id, title: p.title })))
-      .then((count) => {
-        if (count > 0) refreshChatLog()
+      .migrateProjectMembership()
+      .then((counts) => {
+        if (counts.chats + counts.people + counts.folders === 0) return
+        console.info('[chat] membership migrated to links:', counts)
+        refreshChatLog()
+        refreshChatProjectMap()
       })
-      .catch((error) => console.error('[chat] migrateChatProjectRefs failed:', error))
+      .catch((error) => console.error('[chat] migrateProjectMembership failed:', error))
   }, [projects])
 
   /* Model and effort are spawn arguments, so changing either replaces the chat's process straight
@@ -818,6 +882,22 @@ export default function ChatWindow({
 
   const allConversations = notionChats.concat(conversations)
 
+  /* The chips are made of two things that both arrive after the window does: the project list, and
+     the map saying which projects each chat is in — the chats no longer carry that themselves, so it
+     takes a request per project and lands well after the chat it belongs to is on screen. Setting
+     them only when a chat is picked therefore left a chat opened in that first second looking
+     unattached, and it stayed that way until another chat was selected.
+
+     Keyed on the refs array rather than on the conversation, so a message arriving does not
+     recompute this on every chunk. Held back until the projects are in: resolving refs against an
+     empty list would blank the chips and then fill them in again. */
+  const activeRefs = allConversations.find((c) => c.id === activeId)?.referencedProjectRefs
+  useEffect(() => {
+    if (projects.length === 0) return
+    setAttachedProjects(projectsForRefs(activeRefs ?? []))
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeId, activeRefs, projects])
+
   /** Resolves what a chat's row stores back to the projects themselves. Ids are matched as ids, so a
       project renamed in Notion still resolves; a value that is not an id is a title from before the
       switch and is matched by name, which is the one case a rename still breaks.
@@ -850,6 +930,7 @@ export default function ChatWindow({
     void loadSystemInstruction()
     refreshSkills()
     refreshPeople()
+    refreshPages()
   }, [])
 
   function refreshPeople(): void {
@@ -887,6 +968,47 @@ export default function ChatWindow({
   function openPerson(id: string): void {
     setActivePersonId(id)
     setRoute('person')
+  }
+
+  /* Pages are the library the projects draw from: every one of them, whether a project links to it
+     or not. A page made from here belongs to nothing until something links it. */
+  function refreshPages(): void {
+    window.api
+      .getPages()
+      .then((rows) => setPages(rows.map((row) => ({ id: row.id, title: row.title }))))
+      .catch((error) => console.error('[pages] getPages failed:', error))
+  }
+
+  function createPage(): void {
+    window.api
+      .createPage('Untitled page', '')
+      .then((id) => {
+        refreshPages()
+        setActivePageId(id)
+        setRoute('page')
+      })
+      .catch((error) => console.error('[pages] createPage failed:', error))
+  }
+
+  /* Deletes the page itself, unlike the remove button inside a project, which only drops that
+     project's link. Every project linking to it loses it. */
+  function deletePage(id: string): void {
+    window.api
+      .deleteContextPage(id)
+      .then(() => {
+        refreshPages()
+        refreshProjects()
+        if (activePageId === id) {
+          setActivePageId(null)
+          setRoute('pages')
+        }
+      })
+      .catch((error) => console.error('[pages] deleteContextPage failed:', error))
+  }
+
+  function openPage(id: string): void {
+    setActivePageId(id)
+    setRoute('page')
   }
 
   function refreshSkills(): void {
@@ -940,6 +1062,10 @@ export default function ChatWindow({
       setRoute(activePersonId && people.some((p) => p.id === activePersonId) ? 'person' : 'people')
       return
     }
+    if (section === 'pages') {
+      setRoute(activePageId && pages.some((p) => p.id === activePageId) ? 'page' : 'pages')
+      return
+    }
     setRoute(section)
   }
 
@@ -983,20 +1109,31 @@ export default function ChatWindow({
 
   /** Keeps the newest message vertically centered instead of pinned to the bottom edge, near the
       composer — a spacer after the last message pads the scroll area so centering it (via scrollTop)
-      still lands on the true bottom once the message grows past the spacer. */
+      still lands on the true bottom once the message grows past the spacer.
+
+      Opening a chat forces that pin. The transcript often lays out after the first commit (wrapping,
+      tool groups, the pane mounting when leaving projects), so a ResizeObserver re-pins as the
+      content actually grows rather than leaving the view on the oldest messages. */
   useLayoutEffect(() => {
+    stickToBottom.current = true
+    pinScroll()
+    const frame = requestAnimationFrame(pinScroll)
+    return () => cancelAnimationFrame(frame)
+  }, [activeId, route])
+
+  useLayoutEffect(() => {
+    pinScroll()
+  }, [messages, streamingId])
+
+  useEffect(() => {
     const el = scrollRef.current
-    const lastEl = lastMessageRef.current
-    const spacerEl = spacerRef.current
     if (!el) return
-    if (spacerEl) {
-      const lastHeight = lastEl?.offsetHeight ?? 0
-      const spacer = Math.max(0, Math.round((el.clientHeight - lastHeight) / 2))
-      spacerEl.style.height = `${spacer}px`
-    }
-    el.scrollTop = el.scrollHeight
-    updateFadeEdges()
-  }, [messages, activeId, streamingId])
+    const observer = new ResizeObserver(() => pinScroll())
+    observer.observe(el)
+    const inner = el.firstElementChild
+    if (inner) observer.observe(inner)
+    return () => observer.disconnect()
+  }, [activeId, route, messages.length])
 
   useEffect(() => () => clearTimer(), [])
 
@@ -1245,10 +1382,17 @@ export default function ChatWindow({
   }
 
   /** Reads the current version stamp of every attached project. Cheap next to assembling the
-      context: it skips the per-context-page fetches that make that expensive. */
-  async function readVersions(attached: Project[]): Promise<Record<string, string>> {
+      context: it skips the per-context-page fetches that make that expensive.
+
+      `ownSessionId` is the chat the stamps are for, and is left out of them for the same reason it
+      is left out of the context — otherwise a chat attached to a project would restamp that project
+      every time it sent a message, and rebuild its own prompt on the message after. */
+  async function readVersions(
+    attached: Project[],
+    ownSessionId?: string
+  ): Promise<Record<string, string>> {
     const entries = await Promise.all(
-      attached.map(async (p) => [p.id, await window.api.getProjectVersion(p.id)] as const)
+      attached.map(async (p) => [p.id, await window.api.getProjectVersion(p.id, ownSessionId)] as const)
     )
     return Object.fromEntries(entries)
   }
@@ -1266,7 +1410,15 @@ export default function ChatWindow({
       The stamps are read after the context, not before: a project edited mid-assembly then leaves a
       stamp newer than what was actually fetched, and the next send reassembles. Reading them first
       would record the edit as already included and never pick it up. */
-  async function assembleSystemPrompt(attached: Project[], activeSkills: Skill[]): Promise<AssembledContext> {
+  async function assembleSystemPrompt(
+    attached: Project[],
+    activeSkills: Skill[],
+    /* The chat being assembled for. Its own transcript is dropped from every project it is attached
+       to: continuing a chat resumes its session, so the CLI already holds the conversation, and
+       injecting it again would send every turn twice — the second copy labelled as a finished
+       conversation not to respond to. */
+    ownSessionId?: string
+  ): Promise<AssembledContext> {
     const base = systemInstruction.current
     /* Skill bodies are already in hand — they arrived with the skills list — so switching one on
        costs the respawn and nothing else. */
@@ -1277,9 +1429,12 @@ export default function ChatWindow({
 
     try {
       const contexts = await Promise.all(
-        attached.map(async (p) => ({ title: p.title, text: (await window.api.getProjectContext(p.id)).trim() }))
+        attached.map(async (p) => ({
+          title: p.title,
+          text: (await window.api.getProjectContext(p.id, ownSessionId)).trim()
+        }))
       )
-      const versions = await readVersions(attached)
+      const versions = await readVersions(attached, ownSessionId)
       const projectContext = buildSystemPrompt(contexts.map((c) => ({ label: c.title, text: c.text })))
       return { systemPrompt: join([base, skillsPrompt, projectContext]), versions }
     } catch (error) {
@@ -1309,7 +1464,11 @@ export default function ChatWindow({
     if (nextSkillNames && sessionId) saveActiveSkills(sessionId, nextSkillNames)
 
     void (async () => {
-      const { systemPrompt, versions } = await assembleSystemPrompt(next, activeSkillsFor(skillNames))
+      const { systemPrompt, versions } = await assembleSystemPrompt(
+        next,
+        activeSkillsFor(skillNames),
+        sessionId
+      )
       patch(conversationId, (c) => ({
         ...c,
         referencedProjectRefs: projectIds,
@@ -1330,9 +1489,9 @@ export default function ChatWindow({
 
       try {
         const sourceId = await ensureSourceId(conversationId)
-        if (sourceId) await window.api.setChatProject(sourceId, projectIds)
+        if (sourceId) await syncChatLinks(sourceId, projectIds)
       } catch (error) {
-        console.error('[chat] setChatProject failed:', error)
+        console.error('[chat] project link sync failed:', error)
       }
     })()
   }
@@ -1347,6 +1506,23 @@ export default function ChatWindow({
         : undefined) ?? []
     const next = current.includes(name) ? current.filter((n) => n !== name) : current.concat(name)
     applyAttachment(attachedProjects, next)
+  }
+
+  /** Brings a chat's links into line with the projects it is attached to: one link written on each
+      project it joined, one deleted from each it left. The chat's own row records nothing about
+      projects any more — the projects hold it. */
+  async function syncChatLinks(chatId: string, projectIds: string[]): Promise<void> {
+    const key = normalizeNotionId(chatId)
+    const before = chatProjectMap.current[key] ?? []
+
+    for (const id of projectIds) {
+      if (!before.some((known) => sameNotionId(known, id))) await window.api.linkContext(id, [chatId])
+    }
+    for (const id of before) {
+      if (!projectIds.some((kept) => sameNotionId(kept, id))) await window.api.unlinkContext(id, chatId)
+    }
+
+    chatProjectMap.current = { ...chatProjectMap.current, [key]: projectIds }
   }
 
   function attachProject(id: string): void {
@@ -1366,6 +1542,12 @@ export default function ChatWindow({
       The title is dropped alongside the id because a row untouched since the switch still holds the
       title, and that is the copy the unlink just removed in Notion. */
   function chatUnlinkedFromProject(chatId: string, projectId: string, projectTitle: string): void {
+    const key = normalizeNotionId(chatId)
+    chatProjectMap.current = {
+      ...chatProjectMap.current,
+      [key]: (chatProjectMap.current[key] ?? []).filter((ref) => !sameNotionId(ref, projectId))
+    }
+
     const drop = (c: Conversation): Conversation =>
       c.sourceId !== chatId
         ? c
@@ -1374,6 +1556,8 @@ export default function ChatWindow({
             referencedProjectRefs: (c.referencedProjectRefs ?? []).filter(
               (ref) => !(isNotionId(ref) ? sameNotionId(ref, projectId) : ref === projectTitle)
             ),
+            /* Also dropped from the held map, or the next attachment sync would think the chat is
+               still in that project and leave the link it just removed alone. */
             systemPrompt: undefined,
             contextVersions: undefined
           }
@@ -1466,15 +1650,23 @@ export default function ChatWindow({
     let systemPrompt = conv?.systemPrompt ?? ''
     let contextVersions = conv?.contextVersions
     if (conv?.systemPrompt === undefined) {
-      ({ systemPrompt, versions: contextVersions } = await assembleSystemPrompt(attachedProjects, activeSkills))
+      ({ systemPrompt, versions: contextVersions } = await assembleSystemPrompt(
+        attachedProjects,
+        activeSkills,
+        sessionId
+      ))
     } else if (attachedProjects.length > 0) {
-      const fresh = await readVersions(attachedProjects).catch((error) => {
+      const fresh = await readVersions(attachedProjects, sessionId).catch((error) => {
         console.error('[chat] project version check failed:', error)
         return null
       })
       /* A failed check leaves the cache alone: sending stale context beats dropping it. */
       if (fresh && attachedProjects.some((p) => fresh[p.id] !== contextVersions?.[p.id])) {
-        ({ systemPrompt, versions: contextVersions } = await assembleSystemPrompt(attachedProjects, activeSkills))
+        ({ systemPrompt, versions: contextVersions } = await assembleSystemPrompt(
+          attachedProjects,
+          activeSkills,
+          sessionId
+        ))
       }
     }
 
@@ -1549,7 +1741,7 @@ export default function ChatWindow({
     const sourceId = await ensureSourceId(conversationId)
     if (!sourceId) return
     try {
-      if (projectIdsForNotion.length > 0) await window.api.setChatProject(sourceId, projectIdsForNotion)
+      await syncChatLinks(sourceId, projectIdsForNotion)
       await window.api.updateLastActive(sourceId)
       refreshChatLog()
     } catch (error) {
@@ -1659,6 +1851,7 @@ export default function ChatWindow({
         <ProjectContextModal
           projectId={contextProject.id}
           title={contextProject.title}
+          excludeSessionId={activeId === null ? undefined : sessionIdByConversation.current.get(activeId)}
           onClose={() => setContextProjectId(null)}
         />
       ) : null}
@@ -1707,11 +1900,22 @@ export default function ChatWindow({
               onSelectSkill={openSkill}
               onNewSkill={createSkill}
               onDeleteSkill={deleteSkill}
-              people={people}
+              people={people.map((person) => ({
+                ...person,
+                projects: projectsForRefs(projectMap[normalizeNotionId(person.id)] ?? [])
+              }))}
               activePersonId={activePersonId}
               onSelectPerson={openPerson}
               onNewPerson={createPerson}
               onDeletePerson={deletePerson}
+              pages={pages.map((page) => ({
+                ...page,
+                projects: projectsForRefs(projectMap[normalizeNotionId(page.id)] ?? [])
+              }))}
+              activePageId={activePageId}
+              onSelectPage={openPage}
+              onNewPage={createPage}
+              onDeletePage={deletePage}
               onNewProject={newProject}
               route={route}
               onNavigate={navigate}
@@ -1746,7 +1950,27 @@ export default function ChatWindow({
             overflow: 'hidden'
           }}
         >
-          {route === 'people' || (route === 'person' && !activePersonId) ? (
+          {route === 'pages' || (route === 'page' && !activePageId) ? (
+            <div
+              style={{
+                flex: '1 1 auto',
+                display: 'flex',
+                alignItems: 'center',
+                justifyContent: 'center',
+                padding: '0 24px'
+              }}
+            >
+              <span style={{ font: 'var(--type-body)', color: 'var(--text-faint)' }}>
+                Select a page from the sidebar, or add a new one.
+              </span>
+            </div>
+          ) : route === 'page' && activePageId ? (
+            <PageDetailView
+              pageId={activePageId}
+              onBack={() => setRoute('pages')}
+              onSaved={refreshPages}
+            />
+          ) : route === 'people' || (route === 'person' && !activePersonId) ? (
             <div
               style={{
                 flex: '1 1 auto',
@@ -1890,7 +2114,7 @@ export default function ChatWindow({
         <div
           ref={scrollRef}
           className="chatscroll"
-          onScroll={updateFadeEdges}
+          onScroll={onChatScroll}
           style={{
             flex: '1 1 auto',
             overflowY: 'auto',
@@ -1967,6 +2191,7 @@ export default function ChatWindow({
             onSelectModel={selectModel}
             efforts={EFFORTS}
             effortId={effortId}
+            defaultModelId={DEFAULT_MODEL_ID}
             defaultEffortId={DEFAULT_EFFORT_ID}
             onSelectEffort={selectEffort}
             projects={projects}

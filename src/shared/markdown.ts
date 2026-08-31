@@ -24,12 +24,15 @@ export type MarkdownBlockType =
     | 'quote'
     | 'code'
     | 'divider'
+    | 'image'
 
 export interface MarkdownBlock {
     type: MarkdownBlockType
     text: string
     /** `to_do` only. */
     checked?: boolean
+    /** `image` only: where the picture is. */
+    url?: string
 }
 
 const FENCE = '```'
@@ -42,6 +45,16 @@ const NUMBERED = /^\d+\.\s+(.*)$/
 const HEADING = /^(#{1,3})\s+(.*)$/
 const QUOTE = /^>\s?(.*)$/
 const DIVIDER = /^(-{3,}|\*{3,}|_{3,})$/
+/* An image is the one block whose content is not its text: the caption is the alt, and the url is
+   what actually has to survive the round trip. Written on a line of its own, the way Notion holds
+   it — an image inside a paragraph has no block to be.
+
+   The url runs greedily to the last `)` on the line rather than stopping at the first, because urls
+   have parentheses in them: a file called `Screenshot (1).png` keeps its brackets through Notion's
+   storage, and stopping early left the whole line unmatched and written back as literal text. The
+   caption is read lazily for the same reason from the other end — a bracket in a caption used to
+   cost the image the same way. */
+const IMAGE = /^!\[(.*?)\]\((.+)\)$/
 
 /** Parses an edited body into the blocks Notion should hold. */
 export function markdownToBlocks(text: string): MarkdownBlock[] {
@@ -68,6 +81,12 @@ export function markdownToBlocks(text: string): MarkdownBlock[] {
 
         if (DIVIDER.test(trimmed)) {
             blocks.push({ type: 'divider', text: '' })
+            continue
+        }
+
+        const image = IMAGE.exec(trimmed)
+        if (image) {
+            blocks.push({ type: 'image', text: image[1], url: image[2] })
             continue
         }
 
@@ -112,11 +131,19 @@ export function markdownToBlocks(text: string): MarkdownBlock[] {
 
 /** The inverse: what the editor shows for a page Notion already holds. */
 export function blocksToMarkdown(
-    blocks: Array<{ type: string; text: string; checked?: boolean }>
+    blocks: Array<{ type: string; text: string; checked?: boolean; url?: string }>
 ): string {
     const lines: string[] = []
+    /* Notion holds a numbered list as a run of items and no numbers — the position in the run is the
+       number. Counting the run back is what makes an edited list read `1. 2. 3.` rather than `1.`
+       three times over. Anything that is not another item ends the run, the same way it does in
+       Notion, where a paragraph between two lists restarts the second at one. */
+    let ordinal = 0
 
     for (const block of blocks) {
+        if (block.type === 'numbered_list_item') ordinal += 1
+        else ordinal = 0
+
         switch (block.type) {
             case 'heading_1':
                 lines.push(`# ${block.text}`)
@@ -131,7 +158,7 @@ export function blocksToMarkdown(
                 lines.push(`- ${block.text}`)
                 break
             case 'numbered_list_item':
-                lines.push(`1. ${block.text}`)
+                lines.push(`${ordinal}. ${block.text}`)
                 break
             case 'to_do':
                 lines.push(`- [${block.checked ? 'x' : ' '}] ${block.text}`)
@@ -141,6 +168,12 @@ export function blocksToMarkdown(
                 break
             case 'divider':
                 lines.push('---')
+                break
+            case 'image':
+                /* Shown rather than hidden, so an image is something a person editing the page can
+                   see, move and delete like any other line. A picture with no url has nothing to
+                   write and nothing to come back as, so it is left out entirely. */
+                if (block.url) lines.push(`![${block.text}](${block.url})`)
                 break
             case 'code': {
                 lines.push(FENCE, ...block.text.split(NEWLINE), FENCE)

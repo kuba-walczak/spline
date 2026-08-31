@@ -23,14 +23,16 @@ import {
   createContextPage,
   createProjectPage,
   deleteContextPage,
-  detachChatFromProject,
+  removeContextPage,
+  fetchPages,
+  createPage,
   fetchChatLog,
   archivePerson,
-  attachChatToProject,
   archiveSkill,
   createPerson,
   renamePerson,
   updatePersonContent,
+  updatePersonAffiliation,
   createSkill,
   fetchConfig,
   fetchPeople,
@@ -41,20 +43,26 @@ import {
   fetchProjectVersion,
   fetchProjectDetail,
   fetchProjects,
-  migrateChatProjectRefs,
   renameSkill,
   saveConfig,
   saveSkill,
   setChatEffort,
   setChatModel,
-  setChatProjects,
   setChatSessionId,
   updateContextPageContent,
   updateLastActive,
   updatePageTitle,
   updateProjectColor,
   updateProjectInstructions,
-  updateProjectPeople,
+  linkContext,
+  fetchContextProjectMap,
+  unlinkContext,
+  migrateProjectMembership,
+  createContextFolder,
+  moveContextPage,
+  renameContextPage,
+  renameContextFolder,
+  deleteContextFolder,
   updateProjectTitle
 } from './services/NotionService'
 import { startWakeWordListener, stopWakeWordListener } from './services/WakeWordService'
@@ -336,17 +344,6 @@ ipcMain.handle('notion:updatePageTitle', async (_event, pageId: string, name: st
   await updatePageTitle(pageId, name)
 })
 
-ipcMain.handle('notion:setChatProject', async (_event, pageId: string, projectIds: string[]) => {
-  await setChatProjects(pageId, projectIds)
-})
-
-ipcMain.handle(
-  'notion:migrateChatProjectRefs',
-  async (_event, projects: Array<{ id: string; title: string }>) => {
-    return migrateChatProjectRefs(projects)
-  }
-)
-
 ipcMain.handle('notion:archiveChatPage', async (_event, pageId: string) => {
   await archiveChatPage(pageId)
 })
@@ -376,12 +373,12 @@ ipcMain.handle('notion:getProjectDetail', async (_event, pageId: string) => {
   return fetchProjectDetail(pageId)
 })
 
-ipcMain.handle('notion:getProjectContext', async (_event, projectId: string) => {
-  return fetchProjectContext(projectId)
+ipcMain.handle('notion:getProjectContext', async (_event, projectId: string, excludeSessionId?: string) => {
+  return fetchProjectContext(projectId, excludeSessionId)
 })
 
-ipcMain.handle('notion:getProjectVersion', async (_event, projectId: string) => {
-  return fetchProjectVersion(projectId)
+ipcMain.handle('notion:getProjectVersion', async (_event, projectId: string, excludeSessionId?: string) => {
+  return fetchProjectVersion(projectId, excludeSessionId)
 })
 
 ipcMain.handle('notion:appendProjectNote', async (_event, pageId: string, text: string) => {
@@ -408,22 +405,52 @@ ipcMain.handle('notion:deleteContextPage', async (_event, pageId: string) => {
   await deleteContextPage(pageId)
 })
 
-ipcMain.handle(
-  'notion:unlinkChatFromProject',
-  async (_event, pageId: string, projectId: string, projectTitle: string) => {
-    await detachChatFromProject(pageId, projectId, projectTitle)
-  }
-)
+ipcMain.handle('notion:removeContextPage', async (_event, parentId: string, pageId: string) => {
+  await removeContextPage(parentId, pageId)
+})
 
-ipcMain.handle(
-  'notion:linkChatToProject',
-  async (_event, pageId: string, projectId: string, projectTitle: string) => {
-    await attachChatToProject(pageId, projectId, projectTitle)
-  }
-)
+ipcMain.handle('notion:getPages', async () => {
+  return fetchPages()
+})
 
-ipcMain.handle('notion:updateProjectPeople', async (_event, projectId: string, personIds: string[]) => {
-  await updateProjectPeople(projectId, personIds)
+ipcMain.handle('notion:createPage', async (_event, title: string, text: string) => {
+  return createPage(title, text)
+})
+
+ipcMain.handle('notion:linkContext', async (_event, parentId: string, targetIds: string[]) => {
+  await linkContext(parentId, targetIds)
+})
+
+ipcMain.handle('notion:unlinkContext', async (_event, parentId: string, targetId: string) => {
+  await unlinkContext(parentId, targetId)
+})
+
+ipcMain.handle('notion:getContextProjectMap', async () => {
+  return fetchContextProjectMap()
+})
+
+ipcMain.handle('notion:migrateProjectMembership', async () => {
+  return migrateProjectMembership()
+})
+
+ipcMain.handle('notion:createContextFolder', async (_event, projectId: string, name: string) => {
+  return createContextFolder(projectId, name)
+})
+
+ipcMain.handle('notion:deleteContextFolder', async (_event, folderId: string) => {
+  await deleteContextFolder(folderId)
+})
+
+ipcMain.handle('notion:moveContextPage', async (_event, pageId: string, fromId: string, toId: string) => {
+  return moveContextPage(pageId, fromId, toId)
+})
+
+ipcMain.handle('notion:renameContextPage', async (_event, pageId: string, title: string) => {
+  await renameContextPage(pageId, title)
+})
+
+ipcMain.handle('notion:renameContextFolder', async (_event, folderId: string, name: string) => {
+  await renameContextFolder(folderId, name)
 })
 
 ipcMain.handle('notion:getPeople', async () => {
@@ -440,6 +467,10 @@ ipcMain.handle('notion:createPerson', async (_event, name: string) => {
 
 ipcMain.handle('notion:updatePersonContent', async (_event, pageId: string, text: string) => {
   await updatePersonContent(pageId, text)
+})
+
+ipcMain.handle('notion:updatePersonAffiliation', async (_event, pageId: string, affiliation: string) => {
+  await updatePersonAffiliation(pageId, affiliation)
 })
 
 ipcMain.handle('notion:renamePerson', async (_event, pageId: string, name: string) => {

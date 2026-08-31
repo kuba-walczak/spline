@@ -17,23 +17,33 @@ a:hover {
   color: var(--text-link-hover);
 }
 
+/* The app's scrollbar, in two flavours. `chatscroll` also holds a gutter open on both edges so a
+   list that grows past its box does not shift its contents sideways the moment the bar appears.
+   `menuscroll` is the same bar without that reservation, for the popovers: they are padded by a few
+   pixels, and a 10px gutter on each edge would inset their rows well past the panel they hang off.
+   Everything that makes the bar look the way it does is shared, so the two cannot drift apart. */
 .chatscroll {
   scrollbar-gutter: stable both-edges;
 }
-.chatscroll::-webkit-scrollbar {
+.chatscroll::-webkit-scrollbar,
+.menuscroll::-webkit-scrollbar {
   width: 10px;
 }
-.chatscroll::-webkit-scrollbar-track {
+.chatscroll::-webkit-scrollbar-track,
+.menuscroll::-webkit-scrollbar-track {
   background: transparent;
 }
 /* Styling the scrollbar makes the resize grabber and the corner between the bars paint with the
    engine's own default rather than the field's background. Both are cleared so a textarea's own
    surface shows through, wherever it is used. */
 .chatscroll::-webkit-resizer,
-.chatscroll::-webkit-scrollbar-corner {
+.chatscroll::-webkit-scrollbar-corner,
+.menuscroll::-webkit-resizer,
+.menuscroll::-webkit-scrollbar-corner {
   background: transparent;
 }
-.chatscroll::-webkit-scrollbar-thumb {
+.chatscroll::-webkit-scrollbar-thumb,
+.menuscroll::-webkit-scrollbar-thumb {
   background: #313130;
   border-radius: 8px;
   border: 3px solid transparent;

@@ -2,6 +2,7 @@ import { contextBridge, ipcRenderer } from 'electron'
 import { electronAPI } from '@electron-toolkit/preload'
 import type { AppConfig } from '../shared/config'
 import type { Skill, SkillData } from '../shared/skills'
+import type { ContextFolder } from '../shared/context'
 
 const api = {
   setIgnoreMouseEvents: (ignore: boolean) => ipcRenderer.send('setIgnoreMouseEvents', ignore),
@@ -85,14 +86,16 @@ const api = {
     ipcRenderer.invoke('notion:setChatSessionId', pageId, sessionId) as Promise<void>,
   updatePageTitle: (pageId: string, name: string) =>
     ipcRenderer.invoke('notion:updatePageTitle', pageId, name) as Promise<void>,
-  setChatProject: (pageId: string, projectIds: string[]) =>
-    ipcRenderer.invoke('notion:setChatProject', pageId, projectIds) as Promise<void>,
-  migrateChatProjectRefs: (projects: Array<{ id: string; title: string }>) =>
-    ipcRenderer.invoke('notion:migrateChatProjectRefs', projects) as Promise<number>,
   archiveChatPage: (pageId: string) => ipcRenderer.invoke('notion:archiveChatPage', pageId) as Promise<void>,
   getProjects: () =>
     ipcRenderer.invoke('notion:getProjects') as Promise<
-      Array<{ id: string; title: string; lastEdited: string | null; preview: string; color: string | null }>
+      Array<{
+        id: string
+        title: string
+        lastEdited: string | null
+        color: string | null
+        instructions: string
+      }>
     >,
   createProject: (title: string) => ipcRenderer.invoke('notion:createProject', title) as Promise<string>,
   archiveProject: (pageId: string) => ipcRenderer.invoke('notion:archiveProject', pageId) as Promise<void>,
@@ -108,11 +111,12 @@ const api = {
       blocks: Array<{ id: string; type: string; text: string; checked?: boolean; url?: string }>
       chats: Array<{ id: string; name: string; sessionId: string | null; lastEdited?: string | null }>
       people: Array<{ id: string; name: string }>
+      folders: ContextFolder[]
     }>,
-  getProjectContext: (projectId: string) =>
-    ipcRenderer.invoke('notion:getProjectContext', projectId) as Promise<string>,
-  getProjectVersion: (projectId: string) =>
-    ipcRenderer.invoke('notion:getProjectVersion', projectId) as Promise<string>,
+  getProjectContext: (projectId: string, excludeSessionId?: string) =>
+    ipcRenderer.invoke('notion:getProjectContext', projectId, excludeSessionId) as Promise<string>,
+  getProjectVersion: (projectId: string, excludeSessionId?: string) =>
+    ipcRenderer.invoke('notion:getProjectVersion', projectId, excludeSessionId) as Promise<string>,
   appendProjectNote: (pageId: string, text: string) =>
     ipcRenderer.invoke('notion:appendProjectNote', pageId, text) as Promise<void>,
   updateProjectInstructions: (projectId: string, text: string) =>
@@ -125,24 +129,54 @@ const api = {
     ipcRenderer.invoke('notion:createContextPage', projectId, title, text) as Promise<string>,
   deleteContextPage: (pageId: string) =>
     ipcRenderer.invoke('notion:deleteContextPage', pageId) as Promise<void>,
-  unlinkChatFromProject: (pageId: string, projectId: string, projectTitle: string) =>
-    ipcRenderer.invoke('notion:unlinkChatFromProject', pageId, projectId, projectTitle) as Promise<void>,
-  linkChatToProject: (pageId: string, projectId: string, projectTitle: string) =>
-    ipcRenderer.invoke('notion:linkChatToProject', pageId, projectId, projectTitle) as Promise<void>,
-  updateProjectPeople: (projectId: string, personIds: string[]) =>
-    ipcRenderer.invoke('notion:updateProjectPeople', projectId, personIds) as Promise<void>,
+  removeContextPage: (parentId: string, pageId: string) =>
+    ipcRenderer.invoke('notion:removeContextPage', parentId, pageId) as Promise<void>,
+  createPage: (title: string, text: string) =>
+    ipcRenderer.invoke('notion:createPage', title, text) as Promise<string>,
+  getPages: () =>
+    ipcRenderer.invoke('notion:getPages') as Promise<
+      Array<{ id: string; title: string; lastEdited: string | null }>
+    >,
+  createContextFolder: (projectId: string, name: string) =>
+    ipcRenderer.invoke('notion:createContextFolder', projectId, name) as Promise<string>,
+  deleteContextFolder: (folderId: string) =>
+    ipcRenderer.invoke('notion:deleteContextFolder', folderId) as Promise<void>,
+
+  moveContextPage: (pageId: string, fromId: string, toId: string) =>
+    ipcRenderer.invoke('notion:moveContextPage', pageId, fromId, toId) as Promise<string>,
+  renameContextPage: (pageId: string, title: string) =>
+    ipcRenderer.invoke('notion:renameContextPage', pageId, title) as Promise<void>,
+  renameContextFolder: (folderId: string, name: string) =>
+    ipcRenderer.invoke('notion:renameContextFolder', folderId, name) as Promise<void>,
+  getContextProjectMap: () =>
+    ipcRenderer.invoke('notion:getContextProjectMap') as Promise<Record<string, string[]>>,
+  linkContext: (parentId: string, targetIds: string[]) =>
+    ipcRenderer.invoke('notion:linkContext', parentId, targetIds) as Promise<void>,
+  unlinkContext: (parentId: string, targetId: string) =>
+    ipcRenderer.invoke('notion:unlinkContext', parentId, targetId) as Promise<void>,
+  migrateProjectMembership: () =>
+    ipcRenderer.invoke('notion:migrateProjectMembership') as Promise<{
+      chats: number
+      people: number
+      folders: number
+    }>,
   getPeople: () =>
-    ipcRenderer.invoke('notion:getPeople') as Promise<Array<{ id: string; name: string }>>,
+    ipcRenderer.invoke('notion:getPeople') as Promise<
+      Array<{ id: string; name: string; affiliation: string }>
+    >,
   getPerson: (pageId: string) =>
     ipcRenderer.invoke('notion:getPerson', pageId) as Promise<{
       id: string
       name: string
+      affiliation: string
       lastEdited: string | null
       blocks: Array<{ id: string; type: string; text: string; checked?: boolean; url?: string }>
     }>,
   createPerson: (name: string) => ipcRenderer.invoke('notion:createPerson', name) as Promise<string>,
   updatePersonContent: (pageId: string, text: string) =>
     ipcRenderer.invoke('notion:updatePersonContent', pageId, text) as Promise<void>,
+  updatePersonAffiliation: (pageId: string, affiliation: string) =>
+    ipcRenderer.invoke('notion:updatePersonAffiliation', pageId, affiliation) as Promise<void>,
   renamePerson: (pageId: string, name: string) =>
     ipcRenderer.invoke('notion:renamePerson', pageId, name) as Promise<void>,
   archivePerson: (pageId: string) => ipcRenderer.invoke('notion:archivePerson', pageId) as Promise<void>,

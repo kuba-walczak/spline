@@ -11,17 +11,25 @@ import { CONTEXT_SEPARATOR } from '@shared/injection'
 export interface ProjectContextModalProps {
   projectId: string
   title: string
+  /** The chat this is being shown from. Its own transcript is left out of the project's context, so
+      it has to be left out here too — otherwise this shows a section the real prompt does not have. */
+  excludeSessionId?: string
   onClose: () => void
 }
 
-export function ProjectContextModal({ projectId, title, onClose }: ProjectContextModalProps): ReactElement {
+export function ProjectContextModal({
+  projectId,
+  title,
+  excludeSessionId,
+  onClose
+}: ProjectContextModalProps): ReactElement {
   const [context, setContext] = useState<string | null>(null)
   const [failed, setFailed] = useState(false)
 
   useEffect(() => {
     let cancelled = false
     window.api
-      .getProjectContext(projectId)
+      .getProjectContext(projectId, excludeSessionId)
       .then((text) => {
         if (!cancelled) setContext(text)
       })
@@ -32,7 +40,7 @@ export function ProjectContextModal({ projectId, title, onClose }: ProjectContex
     return () => {
       cancelled = true
     }
-  }, [projectId])
+  }, [projectId, excludeSessionId])
 
   /* One block per piece — the project's instructions, each context page, each attached chat —
      divided the way `fetchProjectContext` divides them. */

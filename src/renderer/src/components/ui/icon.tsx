@@ -20,6 +20,8 @@ import {
   Globe,
   House,
   Info,
+  LayoutGrid,
+  List,
   Lock,
   MessageCircle,
   Menu,
@@ -40,6 +42,14 @@ import {
   X
 } from 'lucide-react'
 import type { LucideIcon } from 'lucide-react'
+
+/* Lucide's folder, filled. Its outline is a single closed path, so painting the inside is a matter
+   of giving the svg a fill rather than redrawing anything: the stroke stays on top and the glyph
+   keeps the weight of the set. Used for a folder with something in it, against the plain outline
+   for one that is empty. */
+function FolderFilledGlyph(props: SVGProps<SVGSVGElement>): ReactElement {
+  return <Folder {...props} fill="currentColor" />
+}
 
 /* Lucide's own PanelLeft draws the divider with round caps from y=3 to y=21, so
    each cap bulges half a stroke past the frame's top and bottom edges and reads
@@ -106,9 +116,12 @@ const ICONS: Record<string, LucideIcon> = {
   'ellipsis-vertical': EllipsisVertical,
   'file-text': FileText,
   folder: Folder,
+  'folder-filled': FolderFilledGlyph as unknown as LucideIcon,
   globe: Globe,
   house: House,
   info: Info,
+  'layout-grid': LayoutGrid,
+  list: List,
   lock: Lock,
   'message-circle': MessageCircle,
   menu: Menu,
@@ -137,11 +150,22 @@ export interface IconProps {
   name: IconName
   size?: number
   strokeWidth?: number
+  /** Paints the glyph solid. Lucide draws in stroke on an unfilled path, so a colour here fills the
+      shape that stroke encloses — the same trick `folder-filled` uses, as a switch any icon can
+      take. Left off, the glyph is drawn in outline as usual. */
+  fill?: string
   className?: string
   style?: CSSProperties
 }
 
-export function Icon({ name, size = 16, strokeWidth = 1.5, className, style }: IconProps): ReactElement | null {
+export function Icon({
+  name,
+  size = 16,
+  strokeWidth = 1.5,
+  fill,
+  className,
+  style
+}: IconProps): ReactElement | null {
   const Glyph = ICONS[name]
   if (!Glyph) return null
   return (
@@ -149,6 +173,10 @@ export function Icon({ name, size = 16, strokeWidth = 1.5, className, style }: I
       width={size}
       height={size}
       strokeWidth={strokeWidth}
+      /* Spread rather than passed straight through: `fill={undefined}` still counts as the prop
+         being set, so it overrides the `fill="none"` each glyph is drawn with and the shape falls
+         back to SVG's own default of black. Absent means absent. */
+      {...(fill ? { fill } : {})}
       aria-hidden
       focusable="false"
       className={className}

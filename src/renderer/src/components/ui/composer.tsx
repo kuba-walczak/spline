@@ -20,7 +20,6 @@ export interface ComposerSkill {
 export interface ComposerModel {
   id: string
   name: string
-  description: string
 }
 
 export interface ComposerEffort {
@@ -42,6 +41,7 @@ export interface ComposerProps {
   onSelectModel?: (id: string) => void
   efforts?: ComposerEffort[]
   effortId?: string
+  defaultModelId?: string
   defaultEffortId?: string
   onSelectEffort?: (id: string) => void
   projects?: ComposerProject[]
@@ -90,6 +90,27 @@ const CONTEXT_FULL = 0.9
 
     Behind a menu rather than always in view because it is a number worth checking, not watching —
     and in here there is room to print it, which the strip across the composer never had. */
+/** Marks the model or effort a new chat starts on, in both lists. */
+function DefaultBadge(): ReactElement {
+  return (
+    <span
+      style={{
+        flex: '0 0 auto',
+        display: 'inline-flex',
+        alignItems: 'center',
+        height: 18,
+        padding: '0 6px',
+        background: 'var(--surface-control)',
+        borderRadius: 4,
+        font: 'var(--weight-medium) var(--text-xs)/1 var(--font-sans)',
+        color: 'var(--text-body)'
+      }}
+    >
+      Default
+    </span>
+  )
+}
+
 function ContextMeter({ tokens }: { tokens: number }): ReactElement {
   const fraction = usageFraction(tokens)
   const color =
@@ -111,7 +132,7 @@ function ContextMeter({ tokens }: { tokens: number }): ReactElement {
         >
           <span style={{ color: 'var(--text-muted)' }}>Context</span>
           <span style={{ color: 'var(--text-faint)' }}>
-            {formatTokens(tokens)} / {formatTokens(CONTEXT_WINDOW)} · {Math.round(fraction * 100)}%
+            {formatTokens(tokens)} / {formatTokens(CONTEXT_WINDOW)}
           </span>
         </div>
         <div
@@ -135,7 +156,7 @@ function ContextMeter({ tokens }: { tokens: number }): ReactElement {
           />
         </div>
       </div>
-      <div style={{ height: 1, margin: 'var(--space-2) 8px', background: 'var(--border-default)' }} />
+      <div style={{ height: 1, margin: 'var(--space-2) calc(var(--space-2) * -1)', background: 'var(--border-default)' }} />
     </>
   )
 }
@@ -317,6 +338,7 @@ export function Composer({
   onSelectModel,
   efforts,
   effortId,
+  defaultModelId,
   defaultEffortId,
   onSelectEffort,
   projects,
@@ -632,7 +654,11 @@ export function Composer({
                     }}
                   >
                   {contextTokens !== null && contextTokens > 0 ? <ContextMeter tokens={contextTokens} /> : null}
-                  <div style={{ maxHeight: 320, overflowY: 'auto' }}>
+                  {/* Sideways is explicitly off. A scroll container with `overflow-y: auto` computes
+                      its `overflow-x` to `auto` as well, so any sub-pixel overflow — a letter-spaced
+                      last character, a rounded 100%-width row — puts a horizontal bar under the
+                      list. Nothing in a menu should scroll sideways anyway. */}
+                  <div style={{ maxHeight: 320, overflowY: 'auto', overflowX: 'hidden' }}>
                     {models.map((m) => (
                       <button
                         key={m.id}
@@ -643,7 +669,7 @@ export function Composer({
                         }}
                         style={{
                           display: 'flex',
-                          alignItems: 'flex-start',
+                          alignItems: 'center',
                           gap: 10,
                           width: '100%',
                           boxSizing: 'border-box',
@@ -662,26 +688,23 @@ export function Composer({
                         }}
                         onMouseLeave={(ev) => (ev.currentTarget.style.background = 'transparent')}
                       >
-                        <div style={{ flex: '1 1 auto', minWidth: 0, display: 'flex', flexDirection: 'column', gap: 3 }}>
-                          <span
-                            style={{
-                              font: 'var(--weight-medium) var(--text-base)/1.2 var(--font-sans)',
-                              letterSpacing: 'var(--tracking-tight)',
-                              color: 'var(--text-primary)'
-                            }}
-                          >
-                            {m.name}
-                          </span>
-                          <span
-                            style={{
-                              font: 'var(--weight-regular) var(--text-sm)/1.35 var(--font-sans)',
-                              letterSpacing: 'var(--tracking-tight)',
-                              color: 'var(--text-muted)'
-                            }}
-                          >
-                            {m.description}
-                          </span>
-                        </div>
+                        <span
+                          style={{
+                            flex: '1 1 auto',
+                            minWidth: 0,
+                            font: 'var(--weight-medium) var(--text-base)/1.2 var(--font-sans)',
+                            letterSpacing: 'var(--tracking-tight)',
+                            color: 'var(--text-primary)',
+                            /* A name long enough to crowd the badge is cut rather than pushing the
+                               row wider than the list. */
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap'
+                          }}
+                        >
+                          {m.name}
+                        </span>
+                        {m.id === defaultModelId ? <DefaultBadge /> : null}
                         {m.id === modelId ? (
                           <span style={{ flex: '0 0 auto', display: 'flex', alignItems: 'center', height: 17, color: '#4a9eff' }}>
                             <Icon name="check" size={17} />
@@ -692,7 +715,7 @@ export function Composer({
 
                     {efforts ? (
                       <>
-                        <div style={{ height: 1, margin: 'var(--space-2) 8px', background: 'var(--border-default)' }} />
+                        <div style={{ height: 1, margin: 'var(--space-2) calc(var(--space-2) * -1)', background: 'var(--border-default)' }} />
                         <button
                           type="button"
                           onClick={() => setEffortMenuOpen(true)}
@@ -703,8 +726,9 @@ export function Composer({
                             gap: 10,
                             width: '100%',
                             boxSizing: 'border-box',
-                            height: 40,
-                            padding: '0 10px 0 8px',
+                            /* Same content-sized box as the model rows above it and the rows in its
+                               own flyout — it sits among them, so it measures like one. */
+                            padding: 'var(--space-3)',
                             background: effortMenuOpen ? 'var(--surface-hover)' : 'transparent',
                             border: 'none',
                             borderRadius: 'var(--radius-sm)',
@@ -720,7 +744,7 @@ export function Composer({
                           <span
                             style={{
                               flex: '1 1 auto',
-                              font: 'var(--weight-medium) var(--text-base)/1 var(--font-sans)',
+                              font: 'var(--weight-medium) var(--text-base)/1.2 var(--font-sans)',
                               letterSpacing: 'var(--tracking-tight)',
                               color: 'var(--text-primary)'
                             }}
@@ -729,7 +753,7 @@ export function Composer({
                           </span>
                           <span
                             style={{
-                              font: 'var(--weight-regular) var(--text-base)/1 var(--font-sans)',
+                              font: 'var(--weight-regular) var(--text-base)/1.2 var(--font-sans)',
                               letterSpacing: 'var(--tracking-tight)',
                               color: 'var(--text-muted)'
                             }}
@@ -759,76 +783,51 @@ export function Composer({
                         boxShadow: '0 8px 24px rgba(0,0,0,0.35)'
                       }}
                     >
-                      <p
-                              style={{
-                                margin: 0,
-                                padding: '10px 10px 12px',
-                                font: 'var(--weight-regular) var(--text-sm)/1.45 var(--font-sans)',
-                                letterSpacing: 'var(--tracking-tight)',
-                                color: 'var(--text-muted)'
-                              }}
-                            >
-                              Higher effort means more thorough responses, but takes longer and uses your limits faster.
-                            </p>
-                            {efforts.map((e) => (
-                              <button
-                                key={e.id}
-                                type="button"
-                                onClick={() => {
-                                  onSelectEffort?.(e.id)
-                                  setEffortMenuOpen(false)
-                                  setModelMenuOpen(false)
-                                }}
-                                style={{
-                                  display: 'flex',
-                                  alignItems: 'center',
-                                  gap: 8,
-                                  width: '100%',
-                                  boxSizing: 'border-box',
-                                  height: 36,
-                                  padding: 'var(--space-2) 8px',
-                                  background: 'transparent',
-                                  border: 'none',
-                                  borderRadius: 'var(--radius-sm)',
-                                  cursor: 'pointer',
-                                  textAlign: 'left'
-                                }}
-                                onMouseEnter={(ev) => (ev.currentTarget.style.background = 'var(--surface-hover)')}
-                                onMouseLeave={(ev) => (ev.currentTarget.style.background = 'transparent')}
-                              >
-                                <span
-                                  style={{
-                                    font: 'var(--weight-medium) var(--text-base)/1 var(--font-sans)',
-                                    letterSpacing: 'var(--tracking-tight)',
-                                    color: 'var(--text-primary)'
-                                  }}
-                                >
-                                  {e.name}
-                                </span>
-                                {e.id === defaultEffortId ? (
-                                  <span
-                                    style={{
-                                      display: 'inline-flex',
-                                      alignItems: 'center',
-                                      height: 18,
-                                      padding: '0 6px',
-                                      background: 'var(--surface-control)',
-                                      borderRadius: 4,
-                                      font: 'var(--weight-medium) var(--text-xs)/1 var(--font-sans)',
-                                      color: 'var(--text-body)'
-                                    }}
-                                  >
-                                    Default
-                                  </span>
-                                ) : null}
-                                <span style={{ flex: '1 1 auto' }} />
-                                {e.id === effortId ? (
-                                  <span style={{ display: 'flex', alignItems: 'center', color: '#4a9eff' }}>
-                                    <Icon name="check" size={15} />
-                                  </span>
-                                ) : null}
-                              </button>
-                            ))}
+                      {efforts.map((e) => (
+                      <button
+                        key={e.id}
+                        type="button"
+                        onClick={() => {
+                          onSelectEffort?.(e.id)
+                          setEffortMenuOpen(false)
+                          setModelMenuOpen(false)
+                        }}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
+                          width: '100%',
+                          boxSizing: 'border-box',
+                          /* Sized by its content on the same padding the model rows use, rather than
+                             by a fixed height, so the two lists match. */
+                          padding: 'var(--space-3)',
+                          background: 'transparent',
+                          border: 'none',
+                          borderRadius: 'var(--radius-sm)',
+                          cursor: 'pointer',
+                          textAlign: 'left'
+                        }}
+                        onMouseEnter={(ev) => (ev.currentTarget.style.background = 'var(--surface-hover)')}
+                        onMouseLeave={(ev) => (ev.currentTarget.style.background = 'transparent')}
+                      >
+                        <span
+                          style={{
+                            font: 'var(--weight-medium) var(--text-base)/1.2 var(--font-sans)',
+                            letterSpacing: 'var(--tracking-tight)',
+                            color: 'var(--text-primary)'
+                          }}
+                        >
+                          {e.name}
+                        </span>
+                        {e.id === defaultEffortId ? <DefaultBadge /> : null}
+                        <span style={{ flex: '1 1 auto' }} />
+                        {e.id === effortId ? (
+                          <span style={{ display: 'flex', alignItems: 'center', color: '#4a9eff' }}>
+                            <Icon name="check" size={15} />
+                          </span>
+                        ) : null}
+                      </button>
+                    ))}
                       </div>
                       </div>
                     ) : null}
