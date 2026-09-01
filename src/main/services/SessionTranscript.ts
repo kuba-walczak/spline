@@ -22,9 +22,17 @@ export function sessionCwd(): string {
     return dir
 }
 
-/** The CLI's folder-naming scheme: the absolute cwd with every separator flattened to a dash. */
+/** The CLI's folder-naming scheme: every character that is not a letter or a digit becomes a
+    dash. On Windows the only such characters in a userData path are the separators, which is why
+    flattening `[\\/:]` was indistinguishable there; on macOS userData sits under
+    `~/Library/Application Support/`, and that space has to fold too or none of the transcripts
+    the CLI writes are ever found again — leaving every chat blank and, worse, sending the second
+    spawn of a session down the `--session-id` path against an id the CLI already knows.
+
+    The CLI additionally caps the encoded name at 200 characters and appends a hash of the original
+    past that. Not reproduced here: the hash is Bun's, and `sessionCwd()` is a quarter of the cap. */
 function encodeCwd(cwd: string): string {
-    return cwd.replace(/[\\/:]/g, '-')
+    return cwd.replace(/[^a-zA-Z0-9]/g, '-')
 }
 
 export function sessionFilePath(sessionId: string): string {

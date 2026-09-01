@@ -41,8 +41,13 @@ export function TitleBar({
         gap: '12px',
         height: '32px',
         background: 'var(--surface-sidebar)',
-        /* Right inset clears the native window-control overlay when there is one. */
-        padding: '0 calc(100vw - env(titlebar-area-width, 100vw) + 16px) 0 12px',
+        /* Insets clear the native window controls wherever they sit: Windows puts its overlay
+           at the right edge, macOS puts the traffic lights at the left. Both are read off the
+           overlay's own geometry rather than hardcoded, and collapse to the plain 12/16px
+           padding on a window that reports no overlay at all. */
+        paddingBlock: 0,
+        paddingLeft: 'calc(env(titlebar-area-x, 0px) + 12px)',
+        paddingRight: 'calc(100vw - env(titlebar-area-x, 0px) - env(titlebar-area-width, 100vw) + 16px)',
         ...dragStyle
       }}
     >

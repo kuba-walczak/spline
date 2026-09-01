@@ -25,6 +25,14 @@ a:hover {
 .chatscroll {
   scrollbar-gutter: stable both-edges;
 }
+/* Overlay scrollbars have no width, so the reservation above yields nothing and every pane loses
+   the 10px it is drawn with. Restore it as padding and drop the reservation, which buys nothing
+   when the bar floats above the content anyway. The flag is set in main.tsx by measuring a plain
+   scroller; it is absent wherever the bars take real width, leaving that path untouched. */
+:root[data-overlay-scrollbars] .chatscroll {
+  scrollbar-gutter: auto;
+  padding-inline: 10px;
+}
 .chatscroll::-webkit-scrollbar,
 .menuscroll::-webkit-scrollbar {
   width: 10px;

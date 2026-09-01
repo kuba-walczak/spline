@@ -1,3 +1,4 @@
+import 'dotenv/config'
 import { spawn, ChildProcessWithoutNullStreams } from 'node:child_process'
 import { writeFileSync, existsSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
@@ -8,22 +9,56 @@ import { sessionCwd, sessionFilePath } from './SessionTranscript'
 const noHooksSettingsPath = join(tmpdir(), 'jarvis-claude-settings.json')
 writeFileSync(noHooksSettingsPath, JSON.stringify({ hooks: {} }))
 
-/* The real binary, not the `claude` on PATH — that is an npm-generated .cmd stub, and Windows
-   cannot execute one of those without a shell. Going through a shell is what we are avoiding:
-   it caps the command line at 8191 characters, eats newlines, and expands `%VAR%` inside the
-   arguments, none of which survive contact with injected project text.
+/* Where the CLI lives, per platform. `.env` is machine-local, but it is written to be copied
+   between the Windows and macOS checkouts: entries are home-relative rather than carrying a
+   username, and `process.platform` picks which one applies. `JARVIS_CLAUDE_PATH` overrides both,
+   for a machine that keeps it somewhere else again.
 
-   Hardcoded because npm replaces package contents in place, so the path outlives version
-   updates. It only moves if the CLI is reinstalled by another method — hence the override. */
-const CLAUDE_EXE =
+   On Windows this must be the real binary, not the `claude` on PATH — that is an npm-generated
+   .cmd stub, and Windows cannot execute one of those without a shell. Going through a shell is
+   what we are avoiding: it caps the command line at 8191 characters, eats newlines, and expands
+   `%VAR%` inside the arguments, none of which survive contact with injected project text.
+
+   On macOS an npm or pnpm install leaves a /bin/sh shim instead, which is harmless — it forwards
+   `"$@"` unmodified, and `stopSession` ends a process by closing stdin, which the shim passes
+   straight through. PATH is still no way to find it: a window opened from Finder inherits
+   launchd's PATH, not the shell's. */
+const FALLBACK_PATHS: Record<string, string[]> = {
+    win32: [join(homedir(), 'AppData', 'Roaming', 'npm', 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe')],
+    darwin: [
+        join(homedir(), '.local', 'bin', 'claude'),
+        join(homedir(), 'Library', 'pnpm', 'claude'),
+        '/opt/homebrew/bin/claude',
+        '/usr/local/bin/claude'
+    ]
+}
+
+/** Expands a leading `~/`, so one `.env` can name a home directory on either machine. */
+function expandHome(path: string): string {
+    return path.startsWith('~/') ? join(homedir(), path.slice(2)) : path
+}
+
+/** The `.env` key this platform reads: `JARVIS_CLAUDE_PATH_WIN32` or `JARVIS_CLAUDE_PATH_DARWIN`. */
+const PLATFORM_KEY = `JARVIS_CLAUDE_PATH_${process.platform.toUpperCase()}`
+
+/* Probed rather than assumed, because the fallbacks only matter when there is no `.env` to read —
+   a packaged build, where dotenv resolves against a cwd of `/`. The first entry is the last
+   resort purely so a failure names a path. */
+const fallbacks = FALLBACK_PATHS[process.platform] ?? []
+
+const CLAUDE_EXE = expandHome(
     process.env.JARVIS_CLAUDE_PATH ??
-    join(homedir(), 'AppData', 'Roaming', 'npm', 'node_modules', '@anthropic-ai', 'claude-code', 'bin', 'claude.exe')
+        process.env[PLATFORM_KEY] ??
+        fallbacks.find((path) => existsSync(path)) ??
+        fallbacks[0] ??
+        'claude'
+)
 
 /** Fails at startup rather than on the first send, where a missing binary would surface as a chat
     that silently never replies. */
 export function assertClaudeExe(): void {
     if (!existsSync(CLAUDE_EXE)) {
-        throw new Error(`claude binary missing at ${CLAUDE_EXE} — set JARVIS_CLAUDE_PATH to override`)
+        throw new Error(`claude binary missing at ${CLAUDE_EXE} — set ${PLATFORM_KEY} in .env`)
     }
 }
 

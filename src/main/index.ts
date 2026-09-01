@@ -195,7 +195,15 @@ claudeEvents.on('debug', (payload) => {
 })
 
 app.whenReady().then(() => {
-  Menu.setApplicationMenu(null)
+  /* macOS routes Cmd+C/V/X/A/Z and Cmd+Q through the application menu, so removing it outright —
+     which is the right move on Windows and Linux, where this window draws its own chrome — would
+     leave the composer unable to paste. Keep the two roles that carry those shortcuts; the menu
+     bar lives at the top of the screen there, so it costs the window nothing. */
+  if (process.platform === 'darwin') {
+    Menu.setApplicationMenu(Menu.buildFromTemplate([{ role: 'appMenu' }, { role: 'editMenu' }]))
+  } else {
+    Menu.setApplicationMenu(null)
+  }
 
   /* Surfaced now rather than on the first send, where a missing binary would look like a chat
      that simply never answers. */
