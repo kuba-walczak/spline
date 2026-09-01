@@ -4,7 +4,7 @@
    same reasoning as the poll interval. Groups can still be toggled individually; this only decides
    what they open as. */
 
-const STORAGE_KEY = 'jarvis.expandTools'
+const STORAGE_KEY = 'spline.expandTools'
 
 export const DEFAULT_EXPAND_TOOLS = true
 

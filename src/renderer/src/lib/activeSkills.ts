@@ -4,7 +4,7 @@
    toggle about how this machine talks to a conversation is not something the row is for. Keyed by
    session id, which is stable for the life of the chat. */
 
-const KEY = (sessionId: string): string => `jarvis.activeSkills.${sessionId}`
+const KEY = (sessionId: string): string => `spline.activeSkills.${sessionId}`
 
 export function loadActiveSkills(sessionId: string): string[] {
     if (!sessionId) return []

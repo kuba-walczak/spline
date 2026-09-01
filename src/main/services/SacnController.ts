@@ -12,7 +12,7 @@ export class SacnController implements LightingService {
         const sender = new Sender({
             universe: UNIVERSE,
             useUnicastDestination: TARGET_IP,
-            defaultPacketOptions: { sourceName: 'jarvis', useRawDmxValues: true }
+            defaultPacketOptions: { sourceName: 'spline', useRawDmxValues: true }
         })
         return new SacnController(sender)
     }

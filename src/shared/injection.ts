@@ -24,9 +24,10 @@ export interface ProjectContext {
 /* Both historical shapes: an open/close pair wrapping the context, and the body-less marker that
    briefly replaced it. Neither is produced any more; both still appear in stored transcripts.
    `guidelines` was the older of the two kinds — it named the global preamble that predated
-   per-project context, and is matched here only so it can be stripped. */
+   per-project context, and is matched here only so it can be stripped. `jarvis` was the project's
+   former name; transcripts written under it carry that namespace instead of `spline`. */
 const LEGACY_BLOCK_PATTERN =
-    /<jarvis:(?:guidelines|project|skill)(?:\s+[a-z]+="[^"]*")*\s*(?:\/>|>\n[\s\S]*?\n<\/jarvis:(?:guidelines|project|skill)>)/g
+    /<(spline|jarvis):(?:guidelines|project|skill)(?:\s+[a-z]+="[^"]*")*\s*(?:\/>|>\n[\s\S]*?\n<\/\1:(?:guidelines|project|skill)>)/g
 
 function escapeAttribute(value: string): string {
     return value.replace(/&/g, '&amp;').replace(/"/g, '&quot;')

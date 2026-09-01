@@ -38,7 +38,7 @@ function escapeName(name: string): string {
     a procedure to follow rather than as something the user typed, and so it can be taken back out
     of the transcript when the chat is reopened. */
 export function renderSkillInvocation(name: string, body: string, text: string): string {
-    const block = `<jarvis:skill name="${escapeName(name)}">\n${body.trim()}\n</jarvis:skill>`
+    const block = `<spline:skill name="${escapeName(name)}">\n${body.trim()}\n</spline:skill>`
     return text ? `${block}\n\n${text}` : block
 }
 

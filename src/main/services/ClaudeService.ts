@@ -6,12 +6,12 @@ import { tmpdir, homedir } from 'node:os'
 import { EventEmitter } from 'node:events'
 import { sessionCwd, sessionFilePath } from './SessionTranscript'
 
-const noHooksSettingsPath = join(tmpdir(), 'jarvis-claude-settings.json')
+const noHooksSettingsPath = join(tmpdir(), 'spline-claude-settings.json')
 writeFileSync(noHooksSettingsPath, JSON.stringify({ hooks: {} }))
 
 /* Where the CLI lives, per platform. `.env` is machine-local, but it is written to be copied
    between the Windows and macOS checkouts: entries are home-relative rather than carrying a
-   username, and `process.platform` picks which one applies. `JARVIS_CLAUDE_PATH` overrides both,
+   username, and `process.platform` picks which one applies. `SPLINE_CLAUDE_PATH` overrides both,
    for a machine that keeps it somewhere else again.
 
    On Windows this must be the real binary, not the `claude` on PATH — that is an npm-generated
@@ -38,8 +38,8 @@ function expandHome(path: string): string {
     return path.startsWith('~/') ? join(homedir(), path.slice(2)) : path
 }
 
-/** The `.env` key this platform reads: `JARVIS_CLAUDE_PATH_WIN32` or `JARVIS_CLAUDE_PATH_DARWIN`. */
-const PLATFORM_KEY = `JARVIS_CLAUDE_PATH_${process.platform.toUpperCase()}`
+/** The `.env` key this platform reads: `SPLINE_CLAUDE_PATH_WIN32` or `SPLINE_CLAUDE_PATH_DARWIN`. */
+const PLATFORM_KEY = `SPLINE_CLAUDE_PATH_${process.platform.toUpperCase()}`
 
 /* Probed rather than assumed, because the fallbacks only matter when there is no `.env` to read —
    a packaged build, where dotenv resolves against a cwd of `/`. The first entry is the last
@@ -47,7 +47,7 @@ const PLATFORM_KEY = `JARVIS_CLAUDE_PATH_${process.platform.toUpperCase()}`
 const fallbacks = FALLBACK_PATHS[process.platform] ?? []
 
 const CLAUDE_EXE = expandHome(
-    process.env.JARVIS_CLAUDE_PATH ??
+    process.env.SPLINE_CLAUDE_PATH ??
         process.env[PLATFORM_KEY] ??
         fallbacks.find((path) => existsSync(path)) ??
         fallbacks[0] ??
@@ -160,7 +160,7 @@ export function getSessionStatuses(): Record<string, SessionStatus> {
    the refresh model the app wants. One file per chat, so concurrent sessions cannot overwrite
    each other's context. */
 function systemPromptPath(sessionId: string): string {
-    return join(tmpdir(), `jarvis-system-prompt-${sessionId}.txt`)
+    return join(tmpdir(), `spline-system-prompt-${sessionId}.txt`)
 }
 
 function clearSystemPromptFile(sessionId: string): void {

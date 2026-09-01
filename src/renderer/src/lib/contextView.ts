@@ -4,8 +4,8 @@
    same reasoning as the tool-group expansion. One setting for every project, since it is a reading
    preference rather than something about a particular project. */
 
-const STORAGE_KEY = 'jarvis.contextView'
-const GROUPING_KEY = 'jarvis.contextGrouping'
+const STORAGE_KEY = 'spline.contextView'
+const GROUPING_KEY = 'spline.contextGrouping'
 
 export type ContextViewMode = 'grid' | 'list'
 
@@ -58,7 +58,7 @@ export function saveContextGrouping(value: boolean): void {
 
 export type GroupableSection = 'chats' | 'pages' | 'people'
 
-const groupingKey = (section: GroupableSection): string => `jarvis.${section}Grouping`
+const groupingKey = (section: GroupableSection): string => `spline.${section}Grouping`
 
 export const DEFAULT_SECTION_GROUPING = false
 

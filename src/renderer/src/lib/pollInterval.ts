@@ -8,7 +8,7 @@
    Stored in localStorage rather than Notion: it is a per-machine preference about refresh frequency,
    not something a chat carries with it. */
 
-const STORAGE_KEY = 'jarvis.pollIntervalSeconds'
+const STORAGE_KEY = 'spline.pollIntervalSeconds'
 
 export const MIN_POLL_SECONDS = 30
 export const MAX_POLL_SECONDS = 60 * 60
