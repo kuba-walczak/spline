@@ -3,49 +3,172 @@ import type { ReactElement } from 'react'
 import { Icon } from '@/components/ui/icon'
 import { Switch } from '@/components/ui/switch'
 import { IconButton } from '@/components/ui/icon-button'
-import { formatPollSeconds, MAX_POLL_SECONDS, MIN_POLL_SECONDS } from '@/lib/pollInterval'
-import { EMPTY_CONFIG, type AppConfig } from '@shared/config'
+import { formatPollSeconds } from '@/lib/pollInterval'
+import {
+  EMPTY_CONFIG,
+  MAX_POLL_SECONDS,
+  MIN_POLL_SECONDS,
+  type AppConfig
+} from '@shared/config'
+import { isValidAffiliation, parseAffiliations, serializeAffiliations } from '@shared/affiliations'
 
-/* Implementation of `Settings.dc.html` from the Claude app design system,
-   scoped down to a single "Prompt" tab per the current spec.
+/* Implementation of `Settings.dc.html` from the Claude app design system.
 
-   The textboxes round-trip through Notion the same way Instructions/Context do
-   elsewhere in the app: draft state, dirty check against the loaded value,
-   explicit sync via the refresh-cw button. Both are fields of one JSON block on
-   the Config page (see NotionService.fetch/saveConfig). */
+   Every setting here is a field of one JSON block on the Config page (see
+   NotionService.fetch/saveConfig), and every one is edited the way Instructions/Context are
+   elsewhere in the app: draft state, a dirty check against the loaded value, and an explicit sync
+   through the refresh-cw button beside the section. That holds for the switch and the slider too —
+   they read from the draft rather than applying as they are dragged, so the page has one rule about
+   when a setting is actually stored. */
 
 export interface SettingsModalProps {
   onClose: () => void
-  /** Called after the config is saved, so chats rebuild their system prompt from the new text. */
-  onSystemPromptSaved: () => void
-  /** Whether tool groups start expanded. */
-  expandTools: boolean
-  onExpandToolsChange: (value: boolean) => void
-  /** How often last-active labels are recomputed and project titles are re-read from Notion. */
-  pollSeconds: number
-  onPollSecondsChange: (seconds: number) => void
+  /** Called after a sync, so the app picks up what was stored. `systemChanged` says whether the
+      system instruction was part of it, since that is the one field open chats have to rebuild a
+      prompt from. */
+  onSaved: (systemChanged: boolean) => void
 }
 
-type SettingsTab = 'general' | 'injection' | 'poll'
+type SettingsTab = 'chats' | 'people'
 
 const TABS: Array<{ id: SettingsTab; label: string; icon: string }> = [
-  { id: 'general', label: 'General', icon: 'settings' },
-  { id: 'injection', label: 'Injection', icon: 'corner-right-down' },
-  { id: 'poll', label: 'Poll', icon: 'refresh-cw' }
+  { id: 'chats', label: 'Chats', icon: 'message-circle' },
+  { id: 'people', label: 'People', icon: 'users' }
 ]
+
+/** One affiliation in the list. The same shell a composer attachment chip and a person's affiliation
+    wear, so the thing being edited here looks like the thing it becomes. */
+function AffiliationChip({
+  label,
+  onRemove,
+  disabled
+}: {
+  label: string
+  onRemove: () => void
+  disabled?: boolean
+}): ReactElement {
+  const [hovered, setHovered] = useState(false)
+
+  return (
+    <span
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        flex: '0 0 auto',
+        maxWidth: 220,
+        height: 28,
+        boxSizing: 'border-box',
+        background: 'var(--surface-control)',
+        border: '1px solid #4D4D4C',
+        borderRadius: 'var(--radius-md)',
+        overflow: 'hidden'
+      }}
+    >
+      <span
+        style={{
+          minWidth: 0,
+          padding: '0 4px 0 10px',
+          color: '#E6E5E2',
+          font: 'var(--type-meta)',
+          letterSpacing: 'var(--tracking-tight)',
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis'
+        }}
+      >
+        {label}
+      </span>
+      <button
+        type="button"
+        onClick={onRemove}
+        disabled={disabled}
+        title={`Remove ${label}`}
+        aria-label={`Remove ${label}`}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          flex: '0 0 auto',
+          height: '100%',
+          padding: '0 7px 0 3px',
+          background: 'transparent',
+          border: 'none',
+          color: '#E6E5E2',
+          cursor: disabled ? 'not-allowed' : 'pointer'
+        }}
+      >
+        <Icon
+          name="x"
+          size={13}
+          style={{ opacity: hovered && !disabled ? 1 : 0.62, transition: 'var(--transition-control)' }}
+        />
+      </button>
+    </span>
+  )
+}
+
+/** A row in the settings nav. Hover brightens the icon and the label and nothing else — the filled
+    row is what says which tab you are on, so painting it under the cursor as well made every tab
+    look selected in passing. */
+function SettingsTabButton({
+  label,
+  icon,
+  selected,
+  onClick
+}: {
+  label: string
+  icon: string
+  selected: boolean
+  onClick: () => void
+}): ReactElement {
+  const [hovered, setHovered] = useState(false)
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '12px',
+        width: '100%',
+        height: '33px',
+        padding: '0 11px',
+        boxSizing: 'border-box',
+        border: 'none',
+        cursor: 'pointer',
+        textAlign: 'left',
+        borderRadius: 'var(--radius-sm)',
+        backgroundColor: selected ? 'var(--surface-hover)' : 'transparent',
+        /* The glyph draws in `currentColor`, so the one colour carries both halves of the row. */
+        color: selected || hovered ? 'var(--text-primary)' : 'var(--text-muted)',
+        transition: 'var(--transition-control)'
+      }}
+    >
+      <Icon name={icon} size={16} />
+      <span
+        style={{
+          font: `var(--weight-${selected ? 'semibold' : 'regular'}) var(--text-base)/1 var(--font-sans)`,
+          letterSpacing: 'var(--tracking-tight)'
+        }}
+      >
+        {label}
+      </span>
+    </button>
+  )
+}
 
 export function SettingsModal({
   onClose,
-  onSystemPromptSaved,
-  expandTools,
-  onExpandToolsChange,
-  pollSeconds,
-  onPollSecondsChange
+  onSaved
 }: SettingsModalProps): ReactElement {
-  const [tab, setTab] = useState<SettingsTab>('general')
+  const [tab, setTab] = useState<SettingsTab>('chats')
 
-  /* Both fields live in one JSON block, so they load together and a save writes the pair — editing
-     one must not drop the other. Each still has its own dirty flag, so only the section being edited
+  /* Every setting lives in one JSON block, so they load together and a save writes the lot — editing
+     one must not drop another. Each still has its own dirty flag, so only the section being edited
      shows a sync button. */
   const [config, setConfig] = useState<AppConfig>(EMPTY_CONFIG)
   const [draft, setDraft] = useState<AppConfig>(EMPTY_CONFIG)
@@ -53,8 +176,30 @@ export function SettingsModal({
   const [failed, setFailed] = useState(false)
   const [saving, setSaving] = useState(false)
 
+  /* What is being typed into the affiliation list, before the plus puts it in the draft. Not part of
+     the config: an unadded name is not a setting yet. */
+  const [newAffiliation, setNewAffiliation] = useState('')
+
   const systemDirty = draft.system !== config.system
   const titleDirty = draft.title !== config.title
+  const affiliationsDirty =
+    draft.affiliations.length !== config.affiliations.length ||
+    draft.affiliations.some((name, i) => name !== config.affiliations[i])
+  const expandToolsDirty = draft.expandTools !== config.expandTools
+  const pollDirty = draft.pollSeconds !== config.pollSeconds
+
+  /* Refused rather than silently deduped, so the reason a name did not appear is visible: a comma
+     would be read back as two affiliations, and a repeat would give the People menu two identical
+     rows. */
+  const trimmedNew = newAffiliation.trim()
+  const duplicate = draft.affiliations.some((name) => name.toLowerCase() === trimmedNew.toLowerCase())
+  const canAdd = isValidAffiliation(newAffiliation) && !duplicate
+
+  function addAffiliation(): void {
+    if (!canAdd) return
+    setDraft((d) => ({ ...d, affiliations: [...d.affiliations, trimmedNew] }))
+    setNewAffiliation('')
+  }
   const placeholder = loading ? 'Loading…' : failed ? 'Could not read the Config block.' : ''
 
   useEffect(() => {
@@ -73,17 +218,48 @@ export function SettingsModal({
 
   /* Writes the whole object either way — the block is one document, and a partial write would blank
      whichever field the other section is holding. */
-  async function sync(onSaved?: () => void): Promise<void> {
+  async function sync(): Promise<void> {
     if (saving || loading || failed) return
     setSaving(true)
     try {
+      const systemChanged = draft.system !== config.system
+      const removed = config.affiliations.filter(
+        (name) => !draft.affiliations.some((kept) => kept.toLowerCase() === name.toLowerCase())
+      )
       await window.api.saveConfig(draft)
       setConfig(draft)
-      onSaved?.()
+      /* After the list is stored, so a failure here leaves people holding an affiliation that is no
+         longer offered — recoverable by removing it again — rather than stripped of one the list
+         still offers. */
+      if (removed.length > 0) {
+        /* Caught here rather than by the block below: the list itself is already stored, so a
+           failure to prune must not look like a failed save or keep the app from picking it up. */
+        try {
+          await pruneAffiliations(removed)
+        } catch (err) {
+          console.error('[settings] pruning removed affiliations failed:', err)
+        }
+      }
+      onSaved(systemChanged)
     } catch (err) {
       console.error('[settings] saveConfig failed:', err)
     } finally {
       setSaving(false)
+    }
+  }
+
+  /* An affiliation taken off the list does not merely stop being offered — it is gone, so it comes
+     off everybody who had it. Only the people who actually held one of the removed names are
+     written, so removing an unused affiliation costs a single read. */
+  async function pruneAffiliations(removed: string[]): Promise<void> {
+    const gone = new Set(removed.map((name) => name.toLowerCase()))
+
+    const people = await window.api.getPeople()
+    for (const person of people) {
+      const held = parseAffiliations(person.affiliation)
+      const kept = held.filter((name) => !gone.has(name.toLowerCase()))
+      if (kept.length === held.length) continue
+      await window.api.updatePersonAffiliation(person.id, serializeAffiliations(kept))
     }
   }
 
@@ -143,37 +319,13 @@ export function SettingsModal({
             Settings
           </span>
           {TABS.map((entry) => (
-            <button
+            <SettingsTabButton
               key={entry.id}
-              type="button"
+              label={entry.label}
+              icon={entry.icon}
+              selected={tab === entry.id}
               onClick={() => setTab(entry.id)}
-              style={{
-                display: 'flex',
-                alignItems: 'center',
-                gap: '12px',
-                width: '100%',
-                height: '33px',
-                padding: '0 11px',
-                boxSizing: 'border-box',
-                border: 'none',
-                cursor: 'pointer',
-                textAlign: 'left',
-                borderRadius: 'var(--radius-sm)',
-                backgroundColor: tab === entry.id ? 'var(--surface-hover)' : 'transparent',
-                color: tab === entry.id ? 'var(--text-primary)' : 'var(--text-muted)',
-                transition: 'var(--transition-control)'
-              }}
-            >
-              <Icon name={entry.icon} size={16} />
-              <span
-                style={{
-                  font: `var(--weight-${tab === entry.id ? 'semibold' : 'regular'}) var(--text-base)/1 var(--font-sans)`,
-                  letterSpacing: 'var(--tracking-tight)'
-                }}
-              >
-                {entry.label}
-              </span>
-            </button>
+            />
           ))}
         </nav>
 
@@ -186,18 +338,38 @@ export function SettingsModal({
             className="chatscroll"
             style={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', padding: '52px 34px 40px', boxSizing: 'border-box' }}
           >
-            {tab === 'general' ? (
+            {tab === 'chats' ? (
               <>
-                <h2
+                <div
                   style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '16px',
                     margin: '0 0 8px',
-                    font: 'var(--weight-semibold) var(--text-lg)/1.3 var(--font-sans)',
-                    letterSpacing: 'var(--tracking-tight)',
-                    color: 'var(--text-primary)'
+                    maxWidth: '710px'
                   }}
                 >
-                  Tool details
-                </h2>
+                  <h2
+                    style={{
+                      margin: 0,
+                      font: 'var(--weight-semibold) var(--text-lg)/1.3 var(--font-sans)',
+                      letterSpacing: 'var(--tracking-tight)',
+                      color: 'var(--text-primary)'
+                    }}
+                  >
+                    Tool details
+                  </h2>
+                  {expandToolsDirty ? (
+                    <IconButton
+                      icon="refresh-cw"
+                      label="Sync to Notion"
+                      size="sm"
+                      onClick={() => void sync()}
+                      disabled={saving}
+                    />
+                  ) : null}
+                </div>
                 <div
                   style={{
                     display: 'flex',
@@ -234,21 +406,24 @@ export function SettingsModal({
                     </div>
                   </div>
                   <Switch
-                    checked={expandTools}
-                    onChange={onExpandToolsChange}
+                    checked={draft.expandTools}
+                    /* Held until the page has been read: a toggle made against the defaults would be
+                       thrown away the moment the load landed on top of the draft. */
+                    onChange={(value) => {
+                      if (loading || failed) return
+                      setDraft((d) => ({ ...d, expandTools: value }))
+                    }}
                     label="Expand tool details by default"
                   />
                 </div>
-              </>
-            ) : tab === 'injection' ? (
-              <>
+
                 <div
                   style={{
                     display: 'flex',
                     alignItems: 'center',
                     justifyContent: 'space-between',
                     gap: '16px',
-                    margin: '0 0 8px',
+                    margin: '32px 0 8px',
                     maxWidth: '710px'
                   }}
                 >
@@ -267,7 +442,7 @@ export function SettingsModal({
                       icon="refresh-cw"
                       label="Sync to Notion"
                       size="sm"
-                      onClick={() => void sync(onSystemPromptSaved)}
+                      onClick={() => void sync()}
                       disabled={saving}
                     />
                   ) : null}
@@ -365,19 +540,37 @@ export function SettingsModal({
                   boxShadow: 'none'
                 }}
               />
-              </>
-            ) : (
-              <>
-                <h2
+
+                <div
                   style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '16px',
                     margin: '32px 0 8px',
-                    font: 'var(--weight-semibold) var(--text-lg)/1.3 var(--font-sans)',
-                    letterSpacing: 'var(--tracking-tight)',
-                    color: 'var(--text-primary)'
+                    maxWidth: '710px'
                   }}
                 >
-                  Refresh rate
-                </h2>
+                  <h2
+                    style={{
+                      margin: 0,
+                      font: 'var(--weight-semibold) var(--text-lg)/1.3 var(--font-sans)',
+                      letterSpacing: 'var(--tracking-tight)',
+                      color: 'var(--text-primary)'
+                    }}
+                  >
+                    Refresh rate
+                  </h2>
+                  {pollDirty ? (
+                    <IconButton
+                      icon="refresh-cw"
+                      label="Sync to Notion"
+                      size="sm"
+                      onClick={() => void sync()}
+                      disabled={saving}
+                    />
+                  ) : null}
+                </div>
                 <p
                   style={{
                     margin: '0 0 24px',
@@ -387,10 +580,8 @@ export function SettingsModal({
                     color: 'var(--text-muted)'
                   }}
                 >
-                  How often the sidebar&rsquo;s &ldquo;last active&rdquo; labels are recalculated, and how often
-                  project titles are re-read from Notion. A chat&rsquo;s timestamp is read when the app starts and
-                  updated the moment you send a message &mdash; this only decides how promptly the wording catches
-                  up with the clock. A project renamed in Notion is picked up on the next tick.
+                  How often the sidebar’s last-active labels are recalculated and project titles are
+                  re-read from Notion.
                 </p>
 
                 <div
@@ -406,8 +597,9 @@ export function SettingsModal({
                     min={MIN_POLL_SECONDS}
                     max={MAX_POLL_SECONDS}
                     step={30}
-                    value={pollSeconds}
-                    onChange={(e) => onPollSecondsChange(Number(e.target.value))}
+                    value={draft.pollSeconds}
+                    onChange={(e) => setDraft((d) => ({ ...d, pollSeconds: Number(e.target.value) }))}
+                    disabled={loading || failed}
                     aria-label="Refresh rate in seconds"
                     style={{ flex: '1 1 auto', accentColor: '#E6E5E2', cursor: 'pointer' }}
                   />
@@ -421,7 +613,7 @@ export function SettingsModal({
                       color: 'var(--text-body)'
                     }}
                   >
-                    {formatPollSeconds(pollSeconds)}
+                    {formatPollSeconds(draft.pollSeconds)}
                   </span>
                 </div>
 
@@ -439,6 +631,142 @@ export function SettingsModal({
                 >
                   <span>30 seconds</span>
                   <span>1 hour</span>
+                </div>
+              </>
+            ) : (
+              <>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '16px',
+                    margin: '0 0 8px',
+                    maxWidth: '710px'
+                  }}
+                >
+                  <h2
+                    style={{
+                      margin: 0,
+                      font: 'var(--weight-semibold) var(--text-lg)/1.3 var(--font-sans)',
+                      letterSpacing: 'var(--tracking-tight)',
+                      color: 'var(--text-primary)'
+                    }}
+                  >
+                    Affiliations
+                  </h2>
+                  {affiliationsDirty ? (
+                    <IconButton
+                      icon="refresh-cw"
+                      label="Sync to Notion"
+                      size="sm"
+                      onClick={() => void sync()}
+                      disabled={saving}
+                    />
+                  ) : null}
+                </div>
+                <p
+                  style={{
+                    margin: '0 0 20px',
+                    maxWidth: '710px',
+                    font: 'var(--weight-regular) var(--text-base)/1.45 var(--font-sans)',
+                    letterSpacing: 'var(--tracking-tight)',
+                    color: 'var(--text-muted)'
+                  }}
+                >
+                  What a person can be affiliated with. A person picks from this list rather than typing
+                  their own, and can hold more than one. Removing one here takes it off everybody who has
+                  it. Stored as the `affiliations` field of the Config page&rsquo;s JSON block.
+                </p>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', maxWidth: '710px' }}>
+                  <input
+                    value={newAffiliation}
+                    onChange={(e) => setNewAffiliation(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key !== 'Enter') return
+                      e.preventDefault()
+                      addAffiliation()
+                    }}
+                    placeholder={placeholder || 'Add an affiliation'}
+                    disabled={loading || failed}
+                    style={{
+                      flex: '1 1 auto',
+                      minWidth: 0,
+                      height: '40px',
+                      boxSizing: 'border-box',
+                      padding: '0 14px',
+                      background: 'var(--surface-inset)',
+                      border: '1px solid var(--border-default)',
+                      borderRadius: 'var(--radius-md)',
+                      color: 'var(--text-body)',
+                      font: 'var(--weight-regular) var(--text-base)/1 var(--font-sans)',
+                      letterSpacing: 'var(--tracking-tight)',
+                      outline: 'none',
+                      boxShadow: 'none'
+                    }}
+                  />
+                  <IconButton
+                    icon="plus"
+                    label="Add affiliation"
+                    variant="filled"
+                    glyphSize={18}
+                    strokeWidth={2.5}
+                    disabled={loading || failed || !canAdd}
+                    onClick={addAffiliation}
+                  />
+                </div>
+
+                {/* Only said when there is something to say — a hint under an empty box would read as
+                    an error before anything had been typed. */}
+                {trimmedNew && !canAdd ? (
+                  <p
+                    style={{
+                      margin: '8px 0 0',
+                      maxWidth: '710px',
+                      font: 'var(--type-meta)',
+                      letterSpacing: 'var(--tracking-tight)',
+                      color: 'var(--text-faint)'
+                    }}
+                  >
+                    {duplicate ? 'Already on the list.' : 'An affiliation cannot contain a comma.'}
+                  </p>
+                ) : null}
+
+                <div
+                  style={{
+                    display: 'flex',
+                    flexWrap: 'wrap',
+                    gap: '8px',
+                    maxWidth: '710px',
+                    marginTop: '20px'
+                  }}
+                >
+                  {draft.affiliations.length === 0 ? (
+                    <span
+                      style={{
+                        font: 'var(--weight-regular) var(--text-base)/1.45 var(--font-sans)',
+                        letterSpacing: 'var(--tracking-tight)',
+                        color: 'var(--text-faint)'
+                      }}
+                    >
+                      {loading ? 'Loading…' : failed ? 'Could not read the Config block.' : 'No affiliations yet.'}
+                    </span>
+                  ) : (
+                    draft.affiliations.map((name) => (
+                      <AffiliationChip
+                        key={name}
+                        label={name}
+                        disabled={saving}
+                        onRemove={() =>
+                          setDraft((d) => ({
+                            ...d,
+                            affiliations: d.affiliations.filter((entry) => entry !== name)
+                          }))
+                        }
+                      />
+                    ))
+                  )}
                 </div>
               </>
             )}

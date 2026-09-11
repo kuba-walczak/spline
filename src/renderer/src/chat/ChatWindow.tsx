@@ -6,14 +6,14 @@ import { TitleBar } from './TitleBar'
 import { SettingsModal } from './SettingsModal'
 import { ProjectContextModal } from './ProjectContextModal'
 import { InjectionModal } from '@/components/ui/injection-modal'
-import { clampPollSeconds, loadPollSeconds, savePollSeconds } from '@/lib/pollInterval'
-import { loadExpandTools, saveExpandTools } from '@/lib/expandTools'
 import { loadActiveSkills, saveActiveSkills } from '@/lib/activeSkills'
+import { loadTitleLocks, saveTitleLock } from '@/lib/titleLock'
 import { usageFromEvent } from '@shared/tokenUsage'
 import ProjectDetailView from './ProjectDetailView'
 import { Icon } from '@/components/ui/icon'
 import { IconButton } from '@/components/ui/icon-button'
 import { buildSystemPrompt } from '@shared/injection'
+import { EMPTY_CONFIG, type AppConfig } from '@shared/config'
 import { isNotionId, normalizeNotionId, sameNotionId } from '@shared/notionId'
 import { buildSkillsPrompt, renderSkillInvocation, type Skill } from '@shared/skills'
 import SkillDetailView from './SkillDetailView'
@@ -574,7 +574,7 @@ export default function ChatWindow({
   const [route, setRoute] = useState('chats')
   const [skills, setSkills] = useState<Skill[]>([])
   const [activeSkillId, setActiveSkillId] = useState<string | null>(null)
-  const [people, setPeople] = useState<Array<{ id: string; name: string }>>([])
+  const [people, setPeople] = useState<Array<{ id: string; name: string; affiliation: string }>>([])
   const [pages, setPages] = useState<Array<{ id: string; title: string }>>([])
   const [activePageId, setActivePageId] = useState<string | null>(null)
   const [activePersonId, setActivePersonId] = useState<string | null>(null)
@@ -587,8 +587,16 @@ export default function ChatWindow({
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false)
   const [sidebarWidth, setSidebarWidth] = useState(308)
   const [settingsOpen, setSettingsOpen] = useState(false)
-  const [pollSeconds, setPollSeconds] = useState(loadPollSeconds)
-  const [expandTools, setExpandTools] = useState(loadExpandTools)
+  /* Every setting, as the Config page in Notion holds them: the two prompts, the affiliation list
+     a person picks from, and the two preferences that used to sit in localStorage. Held here rather
+     than read where each is used, so one request covers the lot and a sync in the modal reaches the
+     views behind it — the People menu included — without them being reopened. Until it lands the app
+     runs on `EMPTY_CONFIG`, which is the defaults. */
+  const [config, setConfig] = useState<AppConfig>(EMPTY_CONFIG)
+  const { affiliations, expandTools, pollSeconds } = config
+  /* Which chats hold the name they have, by session id. Read from storage once at mount rather than
+     per row, and kept in state so the sidebar's lock glyph follows a toggle immediately. */
+  const [titleLocks, setTitleLocks] = useState<Record<string, boolean>>(loadTitleLocks)
   /* The configured system instruction, prepended to every chat's system prompt. Held in a ref because
      `assembleSystemPrompt` reads it from inside async work that may have started before an edit
      landed, and the stale closure value would silently reinstate the old instruction. */
@@ -602,6 +610,9 @@ export default function ChatWindow({
   /** True while the armed skill's instructions are on screen — read off `pendingSkill`, which
       already holds the body, so there is nothing to fetch and nothing to keep in sync. */
   const [showPendingSkill, setShowPendingSkill] = useState(false)
+  /** Switched-on skill whose instructions are open, by id. Held as an id rather than the skill
+      itself so an edit to that skill reaches the open modal. */
+  const [openSkillId, setOpenSkillId] = useState<string | null>(null)
 
   /* Sending the message disarms the skill, and so does dismissing its chip — both leave the modal
      with nothing to show. Closed from here rather than at each of those call sites, so a future one
@@ -750,7 +761,16 @@ export default function ChatWindow({
                   chatProjectMap.current[normalizeNotionId(entry.id)] ?? entry.projectRefs,
                 lastActive: entry.lastActive,
                 systemPrompt: existing?.systemPrompt,
-                contextVersions: existing?.contextVersions
+                contextVersions: existing?.contextVersions,
+                /* Rebuilt rows are replaced wholesale, so anything the row does not carry has to be
+                   restated here or it is lost — and this list is polled, and refreshed again right
+                   after every send. Dropping it switched a persistent skill off the moment the
+                   message it was sent with landed. Storage is the fallback rather than the source:
+                   it is what a reopened chat reads, and the in-memory copy is the newer of the two
+                   while the chat is open. */
+                activeSkillNames:
+                  existing?.activeSkillNames ??
+                  (entry.sessionId ? loadActiveSkills(entry.sessionId) : undefined)
               }
             })
         })
@@ -880,7 +900,9 @@ export default function ChatWindow({
     notionChatsRef.current = notionChats
   }, [notionChats])
 
-  const allConversations = notionChats.concat(conversations)
+  /* Local chats first: a new conversation lives in `conversations` for the rest of the session,
+     and concatenating after the Notion list parked it under every existing row. */
+  const allConversations = conversations.concat(notionChats)
 
   /* The chips are made of two things that both arrive after the window does: the project list, and
      the map saying which projects each chat is in — the chats no longer carry that themselves, so it
@@ -927,7 +949,7 @@ export default function ChatWindow({
   }, [pollSeconds])
 
   useEffect(() => {
-    void loadSystemInstruction()
+    void loadConfig()
     refreshSkills()
     refreshPeople()
     refreshPages()
@@ -1074,37 +1096,36 @@ export default function ChatWindow({
     setRoute('skill')
   }
 
-  async function loadSystemInstruction(): Promise<void> {
+  async function loadConfig(): Promise<void> {
     try {
-      systemInstruction.current = (await window.api.getConfig()).system.trim()
+      const loaded = await window.api.getConfig()
+      setConfig(loaded)
+      systemInstruction.current = loaded.system.trim()
     } catch (error) {
       console.error('[chat] getConfig failed:', error)
     }
   }
 
-  /* An edited instruction has to reach chats already open, so every cached prompt is dropped and
-     rebuilt on the next send rather than being patched in place. */
-  async function refreshSystemInstruction(): Promise<void> {
-    await loadSystemInstruction()
+  /* Called after the settings modal syncs. An edited instruction has to reach chats already open, so
+     when the system field was part of the save every cached prompt is dropped and rebuilt on the
+     next send rather than being patched in place; the other settings apply as soon as the reload
+     lands and cost nothing to pick up. */
+  async function reloadConfig(systemChanged: boolean): Promise<void> {
+    await loadConfig()
+    /* Removing an affiliation takes it off everybody who had it, so the rows that show one are
+       re-read rather than left saying what is no longer true. */
+    refreshPeople()
+    if (!systemChanged) return
     const clear = (c: Conversation): Conversation => ({ ...c, systemPrompt: undefined, contextVersions: undefined })
     setConversations((prev) => prev.map(clear))
     setNotionChats((prev) => prev.map(clear))
   }
 
-  function changeExpandTools(value: boolean): void {
-    setExpandTools(value)
-    saveExpandTools(value)
-  }
-
-  function changePollSeconds(value: number): void {
-    const next = clampPollSeconds(value)
-    setPollSeconds(next)
-    savePollSeconds(next)
-  }
-
   const active = allConversations.find((c) => c.id === activeId) ?? null
   const messages = active ? active.messages : []
   const contextProject = contextProjectId ? (projects.find((p) => p.id === contextProjectId) ?? null) : null
+  /* A skill deleted while its instructions are open simply closes the modal. */
+  const injectionSkill = openSkillId ? (skills.find((sk) => sk.id === openSkillId) ?? null) : null
   const activeSkill = activeSkillId ? (skills.find((sk) => sk.id === activeSkillId) ?? null) : null
 
   /** Keeps the newest message vertically centered instead of pinned to the bottom edge, near the
@@ -1277,8 +1298,8 @@ export default function ChatWindow({
        session from the moment it exists and the Notion row is never written without one. */
     const sessionId = crypto.randomUUID()
     sessionIdByConversation.current.set(id, sessionId)
-    setConversations((prev) =>
-      prev.concat({
+    setConversations((prev) => [
+      {
         id,
         title: UNTITLED,
         messages: [],
@@ -1287,8 +1308,9 @@ export default function ChatWindow({
         effort: effortId,
         loaded: true,
         lastActive: new Date().toISOString()
-      })
-    )
+      },
+      ...prev
+    ])
     setActiveId(id)
     setDraft('')
     setRoute('home')
@@ -1317,10 +1339,18 @@ export default function ChatWindow({
     createConversation()
   }
 
+  /** A chat by id, from whichever list holds it. Only chats started in this run live in
+      `conversations`; everything opened from the sidebar is in `notionChats`, so a lookup against
+      one list alone finds nothing for most chats and reads as an empty conversation. */
+  function conversationById(id: number): Conversation | undefined {
+    return (
+      conversationsRef.current.find((c) => c.id === id) ??
+      notionChatsRef.current.find((c) => c.id === id)
+    )
+  }
+
   async function ensureSourceId(conversationId: number): Promise<string | undefined> {
-    const conv =
-      conversationsRef.current.find((c) => c.id === conversationId) ??
-      notionChatsRef.current.find((c) => c.id === conversationId)
+    const conv = conversationById(conversationId)
     if (conv?.sourceId) return conv.sourceId
 
     const pending = pendingPageId.current.get(conversationId)
@@ -1458,7 +1488,7 @@ export default function ChatWindow({
 
     const projectIds = next.map((p) => p.id)
     const sessionId = sessionIdByConversation.current.get(conversationId)
-    const conversation = conversationsRef.current.find((c) => c.id === conversationId)
+    const conversation = conversationById(conversationId)
     const skillNames = nextSkillNames ?? conversation?.activeSkillNames ?? []
 
     if (nextSkillNames && sessionId) saveActiveSkills(sessionId, nextSkillNames)
@@ -1477,7 +1507,7 @@ export default function ChatWindow({
         contextVersions: versions
       }))
 
-      const conv = conversationsRef.current.find((c) => c.id === conversationId)
+      const conv = conversationById(conversationId)
       if (sessionId) {
         await window.api.restartClaudeSession(
           sessionId,
@@ -1500,10 +1530,11 @@ export default function ChatWindow({
       system prompt is rebuilt and the process respawned exactly as it is for a project. */
   function toggleSkill(name: string): void {
     const conversationId = activeId
+    /* Read from whichever list holds the chat: against `conversations` alone this found nothing for
+       a chat opened from the sidebar, so every click read an empty set and switched the skill on
+       again instead of off. */
     const current =
-      (conversationId !== null
-        ? conversationsRef.current.find((c) => c.id === conversationId)?.activeSkillNames
-        : undefined) ?? []
+      (conversationId !== null ? conversationById(conversationId)?.activeSkillNames : undefined) ?? []
     const next = current.includes(name) ? current.filter((n) => n !== name) : current.concat(name)
     applyAttachment(attachedProjects, next)
   }
@@ -1567,6 +1598,39 @@ export default function ChatWindow({
     if (allConversations.find((c) => c.id === activeId)?.sourceId === chatId) {
       setAttachedProjects((prev) => prev.filter((p) => !sameNotionId(p.id, projectId)))
     }
+  }
+
+  /** Stops (or resumes) the automatic re-title after each message for one chat. The name itself is
+      left exactly as it is — locking is about what happens next, not about the current title. */
+  function toggleTitleLock(id: number): void {
+    const sessionId =
+      sessionIdByConversation.current.get(id) ?? allConversations.find((c) => c.id === id)?.sessionId
+    if (!sessionId) return
+    const next = !titleLocks[sessionId]
+    saveTitleLock(sessionId, next)
+    setTitleLocks((prev) => {
+      const copy = { ...prev }
+      if (next) copy[sessionId] = true
+      else delete copy[sessionId]
+      return copy
+    })
+  }
+
+  /** Renames a chat from the sidebar, in the app and on its Notion row. Deliberately does not lock
+      the name: the two menu entries are separate choices, and a rename on an unlocked chat is
+      replaced by the next re-title pass. */
+  function renameConversation(id: number, title: string): void {
+    const next = title.trim()
+    if (!next) return
+    patch(id, (c) => ({ ...c, title: next }))
+    void (async () => {
+      try {
+        const sourceId = await ensureSourceId(id)
+        if (sourceId) await window.api.updatePageTitle(sourceId, next)
+      } catch (error) {
+        console.error('[chat] rename failed:', error)
+      }
+    })()
   }
 
   function deleteConversation(id: number): void {
@@ -1676,7 +1740,8 @@ export default function ChatWindow({
     /* Placeholder title from the first line, shown instantly — refined moments later by
        refreshTitle() below once the haiku summary comes back. */
     const priorMessages = conv?.messages ?? []
-    const placeholderTitle = priorMessages.length ? conv!.title : titleFrom(text)
+    const placeholderTitle =
+      priorMessages.length || titleLocks[sessionId] ? conv?.title ?? titleFrom(text) : titleFrom(text)
     patch(conversationId, (c) => ({
       ...c,
       title: placeholderTitle,
@@ -1697,14 +1762,32 @@ export default function ChatWindow({
        haiku call, independent of the main conversation, and never blocks sending the prompt.
        The instruction itself is the `title` field of the Config page's JSON block (Settings >
        Injection > Title) — no title refresh happens until that field has text. */
+    /* Read out here rather than inside `refreshTitle`: the narrowing on `sessionId` does not reach
+       into the nested function. */
+    const nameLocked = titleLocks[sessionId] ?? false
     async function refreshTitle(): Promise<void> {
+      /* A locked chat keeps its name — the whole point of the lock is that this pass does not run. */
+      if (nameLocked) return
       try {
         const instruction = (await window.api.getConfig()).title.trim()
         if (!instruction) return
-        const priorUserTexts = priorMessages
+        let priorUserTexts = priorMessages
           .filter((m) => m.role === 'user')
           .map((m) => textOf(m.parts).trim())
           .filter(Boolean)
+        /* The in-memory list is the whole chat once the transcript has been loaded, but a chat sent
+           to before that load finished has none of it — and titling from the newest message alone
+           is how a chat about one thing ends up named after a passing question. Read the session's
+           own transcript in that case, so the title always sees every message the chat holds. */
+        if (priorUserTexts.length === 0 && !conv?.loaded && sessionId) {
+          const rows = await window.api.readSessionTranscript(sessionId).catch(() => [])
+          priorUserTexts = rows
+            .filter((row) => row.role === 'user')
+            .map((row) => textOf(transcriptToParts(row.parts)).trim())
+            /* The CLI may already have written this turn by the time the read lands; it is appended
+               below either way, so drop it here rather than listing it twice. */
+            .filter((t) => t && t !== text)
+        }
         /* Framed as data to summarize, not as requests to fulfill — a bare list of the user's
            questions read as a to-do list and got answered instead of titled. */
         const transcript = priorUserTexts
@@ -1840,11 +1923,7 @@ export default function ChatWindow({
       {settingsOpen ? (
         <SettingsModal
           onClose={() => setSettingsOpen(false)}
-          onSystemPromptSaved={() => void refreshSystemInstruction()}
-          expandTools={expandTools}
-          onExpandToolsChange={changeExpandTools}
-          pollSeconds={pollSeconds}
-          onPollSecondsChange={changePollSeconds}
+          onSaved={(systemChanged) => void reloadConfig(systemChanged)}
         />
       ) : null}
       {contextProject ? (
@@ -1854,6 +1933,15 @@ export default function ChatWindow({
           excludeSessionId={activeId === null ? undefined : sessionIdByConversation.current.get(activeId)}
           onClose={() => setContextProjectId(null)}
         />
+      ) : null}
+      {injectionSkill ? (
+        <InjectionModal
+          title={injectionSkill.name}
+          subtitle="Sent with every message while it is on"
+          onClose={() => setOpenSkillId(null)}
+        >
+          {injectionSkill.body.trim() || 'This skill is empty — nothing is sent for it.'}
+        </InjectionModal>
       ) : null}
       {showPendingSkill && pendingSkill ? (
         <InjectionModal
@@ -1885,17 +1973,20 @@ export default function ChatWindow({
                 title: c.title,
                 projects: projectsForRefs(c.referencedProjectRefs ?? []),
                 status: sessionStatuses[c.sessionId] ?? 'idle',
-                lastActive: c.lastActive
+                lastActive: c.lastActive,
+                titleLocked: titleLocks[c.sessionId] ?? false
               }))}
               activeId={activeId}
               onSelect={selectConversation}
               onNew={startNewChat}
               onDelete={deleteConversation}
+              onRename={renameConversation}
+              onToggleTitleLock={toggleTitleLock}
               projects={projects}
               activeProjectId={activeProjectId}
               onSelectProject={openProject}
               onDeleteProject={deleteProject}
-              skills={skills.map((sk) => ({ id: sk.id, name: sk.name, mode: sk.mode }))}
+              skills={skills.map((sk) => ({ id: sk.id, name: sk.name }))}
               activeSkillId={activeSkillId}
               onSelectSkill={openSkill}
               onNewSkill={createSkill}
@@ -1988,6 +2079,7 @@ export default function ChatWindow({
             <PersonDetailView
               personId={activePersonId}
               fallbackName={people.find((p) => p.id === activePersonId)?.name ?? ''}
+              affiliationOptions={affiliations}
               onBack={() => setRoute('people')}
               onSaved={refreshPeople}
             />
@@ -2202,6 +2294,7 @@ export default function ChatWindow({
             skills={skills.map((sk) => ({ id: sk.id, name: sk.name, mode: sk.mode }))}
             activeSkillNames={active?.activeSkillNames ?? []}
             onToggleSkill={toggleSkill}
+            onOpenSkill={setOpenSkillId}
             pendingSkillName={pendingSkill?.name ?? null}
             onInvokeSkill={(id) => setPendingSkill(skills.find((sk) => sk.id === id) ?? null)}
             onClearPendingSkill={() => setPendingSkill(null)}

@@ -1,14 +1,20 @@
 import { useEffect, useState } from 'react'
 import type { CSSProperties, ReactElement } from 'react'
+import { Icon } from '@/components/ui/icon'
 import { IconButton } from '@/components/ui/icon-button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { blocksToMarkdown } from '@shared/markdown'
+import { parseAffiliations, serializeAffiliations } from '@shared/affiliations'
 
 /* One person: a row in the People table and the page under it.
 
    Laid out the way a skill is, because a person is now the same shape — a name, a column beside it,
-   and a body. The name and the affiliation are the row's columns; the description is the page, read
+   and a body. The name and the affiliations are the row's columns; the description is the page, read
    as markdown and written back the same way.
+
+   Affiliations are picked rather than typed: the list of them lives in Settings → People, and this
+   view only adds from it. A person can hold several, so the one column is read and written as a
+   comma-separated list — see shared/affiliations.
 
    Editing is always on, as it is for a skill, rather than behind a pencil. Nothing is written until
    Sync, and `dirty` compares the drafts against what Notion gave us — so opening a person and
@@ -65,10 +71,127 @@ const noteStyle: CSSProperties = {
   color: 'var(--text-muted)'
 }
 
+/** The add menu, after the composer's: same surface, same hairline, same lift. */
+const menuStyle: CSSProperties = {
+  position: 'absolute',
+  top: 'calc(100% + 8px)',
+  left: 0,
+  zIndex: 41,
+  minWidth: 200,
+  maxHeight: 260,
+  overflowY: 'auto',
+  padding: 'var(--space-2)',
+  background: '#20201F',
+  border: '1px solid var(--border-default)',
+  borderRadius: 'var(--radius-md)',
+  boxShadow: '0 8px 24px rgba(0,0,0,0.35)'
+}
+
+/** One affiliation on a person. The same shell as a composer attachment chip — a project or a skill
+    attached to a message — so the two read as the same kind of thing; the x takes it back off. */
+function AffiliationChip({ label, onRemove }: { label: string; onRemove: () => void }): ReactElement {
+  const [hovered, setHovered] = useState(false)
+
+  return (
+    <span
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        flex: '0 0 auto',
+        maxWidth: 220,
+        height: 28,
+        boxSizing: 'border-box',
+        background: 'var(--surface-control)',
+        border: '1px solid #4D4D4C',
+        borderRadius: 'var(--radius-md)',
+        overflow: 'hidden'
+      }}
+    >
+      <span
+        style={{
+          minWidth: 0,
+          padding: '0 4px 0 10px',
+          color: '#E6E5E2',
+          font: 'var(--type-meta)',
+          letterSpacing: 'var(--tracking-tight)',
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis'
+        }}
+      >
+        {label}
+      </span>
+      <button
+        type="button"
+        onClick={onRemove}
+        title={`Remove ${label}`}
+        aria-label={`Remove ${label}`}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          flex: '0 0 auto',
+          height: '100%',
+          padding: '0 7px 0 3px',
+          background: 'transparent',
+          border: 'none',
+          color: '#E6E5E2',
+          cursor: 'pointer'
+        }}
+      >
+        <Icon
+          name="x"
+          size={13}
+          style={{ opacity: hovered ? 1 : 0.62, transition: 'var(--transition-control)' }}
+        />
+      </button>
+    </span>
+  )
+}
+
+/** A row in the add menu. */
+function MenuItem({ label, onClick }: { label: string; onClick: () => void }): ReactElement {
+  const [hovered, setHovered] = useState(false)
+
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        width: '100%',
+        height: 30,
+        padding: '0 8px',
+        boxSizing: 'border-box',
+        border: 'none',
+        borderRadius: 'var(--radius-sm)',
+        background: hovered ? 'var(--surface-hover)' : 'transparent',
+        color: 'var(--text-primary)',
+        font: 'var(--weight-regular) var(--text-base)/1 var(--font-sans)',
+        letterSpacing: 'var(--tracking-tight)',
+        textAlign: 'left',
+        cursor: 'pointer',
+        transition: 'var(--transition-control)',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis'
+      }}
+    >
+      {label}
+    </button>
+  )
+}
+
 export interface PersonDetailViewProps {
   personId: string
   /** The list's copy, so the heading is populated before the fetch lands. */
   fallbackName: string
+  /** Everything a person can be affiliated with — the list held in Settings → People. */
+  affiliationOptions: string[]
   onBack: () => void
   /** Lets the sidebar list pick up a rename. */
   onSaved: () => void
@@ -77,6 +200,7 @@ export interface PersonDetailViewProps {
 export function PersonDetailView({
   personId,
   fallbackName,
+  affiliationOptions,
   onBack,
   onSaved
 }: PersonDetailViewProps): ReactElement {
@@ -85,9 +209,27 @@ export function PersonDetailView({
   const [failed, setFailed] = useState(false)
 
   const [name, setName] = useState('')
-  const [affiliation, setAffiliation] = useState('')
+  const [affiliations, setAffiliations] = useState<string[]>([])
   const [body, setBody] = useState('')
   const [saving, setSaving] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
+
+  /* Narrows a column's names to the ones the list still offers. Removing an affiliation in Settings
+     removes it from every person as part of that save, so one still sitting in a column is already
+     deleted and showing it would only offer to write it back. */
+  const offered = new Set(affiliationOptions.map((option) => option.toLowerCase()))
+  const offeredOnly = (names: string[]): string[] =>
+    names.filter((name) => offered.has(name.toLowerCase()))
+
+  /* The list can shrink while this person is open — the settings modal sits on top of this view.
+     Whatever it removed is already off them in Notion, so it comes off the draft as well. The
+     unchanged array is returned as itself when there is nothing to drop, so this settles in one
+     pass. */
+  useEffect(() => {
+    setAffiliations((current) =>
+      current.every((name) => offered.has(name.toLowerCase())) ? current : offeredOnly(current)
+    )
+  }, [affiliationOptions])
 
   /* Markdown, so structure survives the round trip: a heading edited here is written back as a
      heading. Images are in it as `![caption](url)`, since the draft is the whole of what the page is
@@ -100,6 +242,7 @@ export function PersonDetailView({
     let cancelled = false
     setLoading(true)
     setFailed(false)
+    setMenuOpen(false)
 
     window.api
       .getPerson(personId)
@@ -107,7 +250,7 @@ export function PersonDetailView({
         if (cancelled) return
         setPerson(loaded)
         setName(loaded.name)
-        setAffiliation(loaded.affiliation)
+        setAffiliations(offeredOnly(parseAffiliations(loaded.affiliation)))
         setBody(toMarkdown(loaded))
       })
       .catch((error) => {
@@ -126,16 +269,34 @@ export function PersonDetailView({
   const title = person?.name || fallbackName || 'Untitled'
   const ready = person !== null && !loading && !failed
   const originalBody = person ? toMarkdown(person) : ''
+
+  /* Compared as the one string the column holds, so a column written by hand in Notion — spaced
+     differently, or with a blank between two commas — does not come back reading as an edit.
+
+     Both sides are narrowed to what the list still offers, and an affiliation removed from the list
+     is removed from everybody who had it, so a name the column holds that is not on the list has
+     already been deleted: showing it would offer to write it back. One written into Notion by hand
+     is hidden the same way, and dropped the next time this person is saved. */
+  const affiliationDraft = serializeAffiliations(affiliations)
+  const originalAffiliation = person
+    ? serializeAffiliations(offeredOnly(parseAffiliations(person.affiliation)))
+    : ''
   const dirty =
-    ready && (name !== person.name || affiliation !== person.affiliation || body !== originalBody)
+    ready &&
+    (name !== person.name || affiliationDraft !== originalAffiliation || body !== originalBody)
+
+  /* What is left to add. Matched case-insensitively, so an affiliation the column came back with in
+     another casing is still recognised as one this person already has. */
+  const chosen = new Set(affiliations.map((a) => a.toLowerCase()))
+  const available = affiliationOptions.filter((option) => !chosen.has(option.toLowerCase()))
 
   async function save(): Promise<void> {
     if (saving || !dirty || !person) return
     setSaving(true)
     try {
       if (name !== person.name) await window.api.renamePerson(personId, name)
-      if (affiliation !== person.affiliation) {
-        await window.api.updatePersonAffiliation(personId, affiliation)
+      if (affiliationDraft !== originalAffiliation) {
+        await window.api.updatePersonAffiliation(personId, affiliationDraft)
       }
       if (body !== originalBody) await window.api.updatePersonContent(personId, body)
 
@@ -144,7 +305,7 @@ export function PersonDetailView({
       const reloaded = await window.api.getPerson(personId)
       setPerson(reloaded)
       setName(reloaded.name)
-      setAffiliation(reloaded.affiliation)
+      setAffiliations(offeredOnly(parseAffiliations(reloaded.affiliation)))
       setBody(toMarkdown(reloaded))
       onSaved()
     } catch (error) {
@@ -158,7 +319,7 @@ export function PersonDetailView({
   function discard(): void {
     if (!person) return
     setName(person.name)
-    setAffiliation(person.affiliation)
+    setAffiliations(offeredOnly(parseAffiliations(person.affiliation)))
     setBody(toMarkdown(person))
   }
 
@@ -267,7 +428,7 @@ export function PersonDetailView({
             </div>
           </div>
 
-          {/* One panelled card, hairline-divided, after the skill view's: name and affiliation share
+          {/* One panelled card, hairline-divided, after the skill view's: name and affiliations share
               the first row — the two columns the row carries — then the page itself below them. */}
           <aside
             style={{
@@ -305,16 +466,82 @@ export function PersonDetailView({
               <div style={{ background: 'var(--border-default)' }} />
 
               <div style={{ padding: 'var(--space-7)', minWidth: 0 }}>
-                <h3 style={{ ...headingStyle, marginBottom: 'var(--space-3)' }}>Affiliation</h3>
+                <h3 style={{ ...headingStyle, marginBottom: 'var(--space-3)' }}>Affiliations</h3>
                 {loading ? (
                   <Skeleton height={FIELD_HEIGHT} radius="var(--radius-md)" delay={0.08} />
                 ) : (
-                  <input
-                    value={affiliation}
-                    onChange={(e) => setAffiliation(e.target.value)}
-                    disabled={failed}
-                    style={{ ...fieldStyle, height: FIELD_HEIGHT }}
-                  />
+                  /* The chips and the plus share one wrapping row rather than sitting in a bordered
+                     field: nothing here is typed into, and a text box would go on promising an edit
+                     this half no longer takes. `minHeight` keeps the row level with the name field
+                     beside it while it is still empty. */
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexWrap: 'wrap',
+                      alignItems: 'center',
+                      gap: 'var(--space-3)',
+                      minHeight: FIELD_HEIGHT
+                    }}
+                  >
+                    {affiliations.map((affiliation) => (
+                      <AffiliationChip
+                        key={affiliation}
+                        label={affiliation}
+                        onRemove={() =>
+                          setAffiliations((current) => current.filter((a) => a !== affiliation))
+                        }
+                      />
+                    ))}
+
+                    <div style={{ position: 'relative', flex: '0 0 auto' }}>
+                      <IconButton
+                        icon="plus"
+                        label="Add affiliation"
+                        size="sm"
+                        glyphSize={16}
+                        strokeWidth={2.5}
+                        active={menuOpen}
+                        disabled={failed}
+                        onClick={() => setMenuOpen((v) => !v)}
+                      />
+                      {menuOpen ? (
+                        <>
+                          {/* Click-away catcher, as the composer's add menu has. */}
+                          <div
+                            onClick={() => setMenuOpen(false)}
+                            style={{ position: 'fixed', inset: 0, zIndex: 40 }}
+                          />
+                          <div style={menuStyle}>
+                            {available.length === 0 ? (
+                              <div
+                                style={{
+                                  padding: '7px 8px',
+                                  font: 'var(--weight-regular) var(--text-base)/1.3 var(--font-sans)',
+                                  letterSpacing: 'var(--tracking-tight)',
+                                  color: 'var(--text-faint)'
+                                }}
+                              >
+                                {affiliationOptions.length > 0
+                                  ? 'All affiliations added'
+                                  : 'Add them in Settings → People'}
+                              </div>
+                            ) : (
+                              available.map((option) => (
+                                <MenuItem
+                                  key={option}
+                                  label={option}
+                                  onClick={() => {
+                                    setMenuOpen(false)
+                                    setAffiliations((current) => [...current, option])
+                                  }}
+                                />
+                              ))
+                            )}
+                          </div>
+                        </>
+                      ) : null}
+                    </div>
+                  </div>
                 )}
               </div>
             </div>

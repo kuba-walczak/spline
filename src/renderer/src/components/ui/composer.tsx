@@ -56,6 +56,8 @@ export interface ComposerProps {
   skills?: ComposerSkill[]
   activeSkillNames?: string[]
   onToggleSkill?: (name: string) => void
+  /** Opens a switched-on persistent skill's instructions — the chevron on its chip. */
+  onOpenSkill?: (id: string) => void
   /** Armed for the next message by picking a one-shot skill. */
   pendingSkillName?: string | null
   onInvokeSkill?: (id: string) => void
@@ -191,7 +193,11 @@ function AttachmentChip({ label, removeTitle, openTitle, onRemove, onOpen }: Att
         flex: '0 0 auto',
         maxWidth: 200,
         height: 28,
+        /* Border-box so the outline does not grow the chip past the 28px the attachment row is
+           sized for. */
+        boxSizing: 'border-box',
         background: 'var(--surface-control)',
+        border: '1px solid #4D4D4C',
         borderRadius: 'var(--radius-md)',
         overflow: 'hidden'
       }}
@@ -248,7 +254,6 @@ function ComposerMenuItem({
   label,
   trailing,
   active,
-  checked,
   onHover,
   onClick
 }: {
@@ -294,15 +299,11 @@ function ComposerMenuItem({
       }}
     >
       <span style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</span>
-      {/* Chevron or tick, both on the right — a reserved slot on the left would indent every label
-          past the ones in a list that has nothing to tick. */}
+      {/* On the right — a reserved slot on the left would indent every label past the ones in a
+          list that has no chevron. */}
       {trailing ? (
         <span style={{ display: 'inline-flex', flex: '0 0 auto', color: 'var(--text-faint)' }}>
           <Icon name={trailing} size={14} />
-        </span>
-      ) : checked ? (
-        <span style={{ display: 'inline-flex', flex: '0 0 auto', color: '#C96442' }}>
-          <Icon name="check" size={14} />
         </span>
       ) : null}
     </button>
@@ -349,6 +350,7 @@ export function Composer({
   skills = [],
   activeSkillNames = [],
   onToggleSkill,
+  onOpenSkill,
   pendingSkillName,
   onInvokeSkill,
   onClearPendingSkill,
@@ -359,6 +361,14 @@ export function Composer({
   className,
   style
 }: ComposerProps): ReactElement {
+  /* Persistent skills that are on for this chat. They belong in the attachment box for the same
+     reason a project does: both are standing context, sent with every message until switched off,
+     and the tick buried in the add menu was the only place either one was visible. Ordered by the
+     skill list rather than by when each was switched on, so the chips do not reshuffle. */
+  const attachedSkills = skills.filter(
+    (skill) => skill.mode === 'persistent' && activeSkillNames.includes(skill.name)
+  )
+
   const [menuOpen, setMenuOpen] = useState(false)
   /* Which of the two lists is showing beside the menu. */
   const [kind, setKind] = useState<'projects' | 'skills' | null>(null)
@@ -370,10 +380,12 @@ export function Composer({
   const textareaRef = useRef<HTMLTextAreaElement | null>(null)
 
   const attachableProjects = (projects ?? []).filter((p) => !attached.some((a) => a.id === p.id))
-  /* An armed one-shot skill drops out of the list, the way an attached project does — it is already
-     shown as a chip, and picking it twice would do nothing. A persistent skill stays put even when
-     switched on: its row is the only way to switch it back off. */
-  const availableSkills = skills.filter((sk) => sk.name !== pendingSkillName)
+  /* Anything already applied drops out of the list, the way an attached project does: an armed
+     one-shot skill, and a persistent one switched on for this chat. Both are shown as a chip, and
+     the chip is what switches them back off — so the menu lists only what can still be added. */
+  const availableSkills = skills.filter(
+    (sk) => sk.name !== pendingSkillName && !attachedSkills.some((on) => on.id === sk.id)
+  )
   const selectedModel = models?.find((m) => m.id === modelId)
   const selectedEffort = efforts?.find((e) => e.id === effortId)
 
@@ -537,21 +549,21 @@ export function Composer({
                           ))
                         )
                       ) : availableSkills.length === 0 ? (
-                        <ComposerMenuEmpty label={skills.length > 0 ? 'No other skills' : 'No skills yet'} />
+                        <ComposerMenuEmpty label={skills.length > 0 ? 'All skills applied' : 'No skills yet'} />
                       ) : (
                         availableSkills.map((skill) => (
                           <ComposerMenuItem
                             key={skill.id}
                             label={skill.name}
-                            /* A persistent skill is switched on and stays; a one-shot one is armed
-                               for the next message, so picking it closes the menu. */
-                            checked={skill.mode === 'persistent' && activeSkillNames.includes(skill.name)}
+                            /* Either way the row leaves the list, so the menu closes behind both:
+                               a persistent skill is switched on and stays, a one-shot one is armed
+                               for the next message. */
                             onClick={() => {
+                              setMenuOpen(false)
                               if (skill.mode === 'persistent') {
                                 onToggleSkill?.(skill.name)
                                 return
                               }
-                              setMenuOpen(false)
                               onInvokeSkill?.(skill.id)
                             }}
                           />
@@ -573,7 +585,7 @@ export function Composer({
             unevenly padded. Its scrollbar rules size a vertical bar anyway, and this scrolls
             horizontally. `chipscroll` instead hides the horizontal bar outright — at 38px tall
             there is no room for one that does not cover the chips it scrolls. */}
-        {attached.length > 0 ? (
+        {attached.length > 0 || attachedSkills.length > 0 ? (
           <div
             className="chipscroll"
             style={{
@@ -600,13 +612,23 @@ export function Composer({
                 onOpen={() => onOpenProject?.(p.id)}
               />
             ))}
+            {/* After the projects: a project is the chat's subject, a skill is how it is answered. */}
+            {attachedSkills.map((skill) => (
+              <AttachmentChip
+                key={skill.id}
+                label={skill.name}
+                removeTitle={`Switch off ${skill.name}`}
+                openTitle={`Show what ${skill.name} injects`}
+                onRemove={() => onToggleSkill?.(skill.name)}
+                onOpen={() => onOpenSkill?.(skill.id)}
+              />
+            ))}
           </div>
         ) : null}
 
-        {/* The one-shot skill waiting on the next message. Sits after the projects box rather than
-            before it: a project is attached for the whole chat, the skill only for the message
-            about to be sent, so reading left to right goes from the standing context to the thing
-            armed right now. Cleared by sending the message or by dismissing the chip. */}
+        {/* The one-shot skill waiting on the next message, deliberately outside the box: everything
+            in there is standing context, sent with every message until it is taken out, and this is
+            spent as soon as the message goes. Cleared by sending it or by dismissing the chip. */}
         {pendingSkillName ? (
           <AttachmentChip
             label={pendingSkillName}

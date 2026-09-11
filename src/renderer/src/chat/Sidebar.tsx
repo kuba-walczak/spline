@@ -22,6 +22,8 @@ export interface SidebarConversation {
   status?: SessionStatus
   /** ISO timestamp of the chat's last message, rendered as "5 minutes ago" while the row is idle. */
   lastActive?: string | null
+  /** True while the chat keeps the name it has — the automatic re-title after each message is off. */
+  titleLocked?: boolean
 }
 
 export type SessionStatus = 'idle' | 'booting' | 'ready'
@@ -74,6 +76,9 @@ export interface SidebarProject {
 export interface SidebarPerson {
   id: string
   name: string
+  /** What they are affiliated with, as the column holds it — several are comma-separated. Shown at
+      the right of the row, where a chat shows its age. */
+  affiliation?: string
   /** The projects this person is in, drawn as folder chips the way a chat row draws its own. */
   projects?: SidebarProject[]
 }
@@ -89,8 +94,6 @@ export interface SidebarPage {
 export interface SidebarSkill {
   id: string
   name: string
-  /** Persistent skills carry a different glyph — they stay on, one-shot ones are typed per message. */
-  mode: 'persistent' | 'oneshot'
 }
 
 export interface SidebarProps {
@@ -99,6 +102,9 @@ export interface SidebarProps {
   onSelect: (id: number) => void
   onNew: () => void
   onDelete: (id: number) => void
+  /** Renames a chat by hand. Does not lock it — a chat left unlocked is re-titled on its next send. */
+  onRename: (id: number, title: string) => void
+  onToggleTitleLock: (id: number) => void
   projects: SidebarProject[]
   activeProjectId: string | null
   onSelectProject: (id: string) => void
@@ -170,11 +176,15 @@ const SECTION_LABEL_WIDTH = 345
 function GroupHeading({
   label,
   color,
+  folder = true,
   collapsed,
   onToggle
 }: {
   label: string
   color: string | null
+  /** Whether the heading carries a folder chip. The "No project" group is defined by not being a
+      project, so a folder next to its name would name the one thing its rows do not have. */
+  folder?: boolean
   collapsed: boolean
   onToggle: () => void
 }): ReactElement {
@@ -199,7 +209,7 @@ function GroupHeading({
         }}
       >
         <Icon name={collapsed ? 'chevron-right' : 'chevron-down'} size={14} />
-        <ProjectFolder color={color} />
+        {folder ? <ProjectFolder color={color} /> : null}
         {label}
       </span>
     </SectionLabel>
@@ -211,10 +221,87 @@ interface ManagedRowProps {
   icon?: string
   leading?: ReactNode
   label: string
+  /** A quiet label at the right of the row — a person's affiliations. Yields to the options button
+      on hover, the way a chat row's age does. */
+  meta?: string
   active: boolean
   optionsLabel: string
   onSelect: () => void
   onDelete: () => void
+}
+
+/** One line of a row's options menu. The rows share a menu shape — a stack of plain left-aligned
+    buttons on the popover's own surface — so the styling lives here rather than at each call site. */
+function MenuItem({
+  label,
+  /** Undefined for a plain action. Set on an entry that is a toggle, and true while it is on —
+      shown as a tick, so the entry reads the same whether it is on or off until you look right. */
+  checked,
+  onSelect
+}: {
+  label: string
+  checked?: boolean
+  onSelect: () => void
+}): ReactElement {
+  return (
+    <button
+      type="button"
+      onClick={onSelect}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: '6px',
+        width: '100%',
+        boxSizing: 'border-box',
+        textAlign: 'left',
+        padding: '4px 8px',
+        background: 'transparent',
+        border: 'none',
+        borderRadius: 'var(--radius-sm)',
+        color: '#E6E5E2',
+        fontFamily: 'var(--font-sans)',
+        fontSize: 'var(--text-base)',
+        fontWeight: 'var(--weight-regular)',
+        lineHeight: 'var(--leading-normal)',
+        letterSpacing: 'var(--tracking-tight)',
+        cursor: 'pointer',
+        whiteSpace: 'nowrap',
+        overflow: 'hidden',
+        textOverflow: 'ellipsis'
+      }}
+      onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--surface-hover)')}
+      onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
+    >
+      <span style={{ flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</span>
+      {checked ? <Icon name="check" size={13} /> : null}
+    </button>
+  )
+}
+
+/** The popover the options button opens: anchored under the row's right edge, over a click-catcher
+    that closes it. */
+function RowMenu({ onDismiss, children }: { onDismiss: () => void; children: ReactNode }): ReactElement {
+  return (
+    <>
+      <div style={{ position: 'fixed', inset: 0, zIndex: 10 }} onClick={onDismiss} />
+      <div
+        style={{
+          position: 'absolute',
+          top: 'calc(var(--row-height) + 2px)',
+          right: 4,
+          zIndex: 11,
+          minWidth: 140,
+          padding: 'var(--space-2)',
+          background: '#20201F',
+          border: '1px solid var(--border-default)',
+          borderRadius: 'var(--radius-md)',
+          boxShadow: '0 8px 24px rgba(0,0,0,0.35)'
+        }}
+      >
+        {children}
+      </div>
+    </>
+  )
 }
 
 /** A sidebar row that can be deleted. Carries the same options menu a chat row does — hidden until
@@ -224,6 +311,7 @@ function ManagedRow({
   icon,
   leading,
   label,
+  meta,
   active,
   optionsLabel,
   onSelect,
@@ -246,6 +334,39 @@ function ManagedRow({
         highlight={CHAT_ROW_HIGHLIGHT}
         hovered={hover || menuOpen}
         onClick={onSelect}
+        /* Traded for a spacer on hover, exactly as a chat row trades its age: the label and the
+           options button share this corner, and whichever can be clicked wins it. In the flex row
+           rather than floating over it, so a long name is ellipsised by the label's own overflow
+           rules instead of running underneath. */
+        trailing={
+          hover || menuOpen ? (
+            <span
+              style={{
+                flex: '0 0 auto',
+                width: 'calc(var(--row-height) - 4px)',
+                marginLeft: '2px'
+              }}
+            />
+          ) : meta ? (
+            <span
+              title={meta}
+              style={{
+                flex: '0 1 auto',
+                minWidth: 0,
+                maxWidth: '45%',
+                marginLeft: '2px',
+                font: 'var(--type-meta)',
+                letterSpacing: 'var(--tracking-tight)',
+                color: 'var(--text-faint)',
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+                textOverflow: 'ellipsis'
+              }}
+            >
+              {meta}
+            </span>
+          ) : null
+        }
       />
       {hover || menuOpen ? (
         <div style={{ position: 'absolute', top: 4, bottom: 4, right: 4 }}>
@@ -264,55 +385,15 @@ function ManagedRow({
         </div>
       ) : null}
       {menuOpen ? (
-        <>
-          <div style={{ position: 'fixed', inset: 0, zIndex: 10 }} onClick={() => setMenuOpen(false)} />
-          <div
-            style={{
-              position: 'absolute',
-              top: 'calc(var(--row-height) + 2px)',
-              right: 4,
-              zIndex: 11,
-              minWidth: 140,
-              padding: 'var(--space-2)',
-              background: '#20201F',
-              border: '1px solid var(--border-default)',
-              borderRadius: 'var(--radius-md)',
-              boxShadow: '0 8px 24px rgba(0,0,0,0.35)'
+        <RowMenu onDismiss={() => setMenuOpen(false)}>
+          <MenuItem
+            label="Delete"
+            onSelect={() => {
+              setMenuOpen(false)
+              onDelete()
             }}
-          >
-            <button
-              type="button"
-              onClick={() => {
-                setMenuOpen(false)
-                onDelete()
-              }}
-              style={{
-                display: 'block',
-                width: '100%',
-                boxSizing: 'border-box',
-                textAlign: 'left',
-                padding: '4px 8px',
-                background: 'transparent',
-                border: 'none',
-                borderRadius: 'var(--radius-sm)',
-                color: '#E6E5E2',
-                fontFamily: 'var(--font-sans)',
-                fontSize: 'var(--text-base)',
-                fontWeight: 'var(--weight-regular)',
-                lineHeight: 'var(--leading-normal)',
-                letterSpacing: 'var(--tracking-tight)',
-                cursor: 'pointer',
-                whiteSpace: 'nowrap',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis'
-              }}
-              onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--surface-hover)')}
-              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-            >
-              Delete
-            </button>
-          </div>
-        </>
+          />
+        </RowMenu>
       ) : null}
     </div>
   )
@@ -323,6 +404,8 @@ interface ChatRowProps {
   active: boolean
   onSelect: () => void
   onDelete: () => void
+  onRename: (title: string) => void
+  onToggleTitleLock: () => void
   onOpenProject: (id: string) => void
   /** False in a grouped list, where the heading above already says which project this is in. */
   showProjects?: boolean
@@ -333,15 +416,108 @@ function ChatRow({
   active,
   onSelect,
   onDelete,
+  onRename,
+  onToggleTitleLock,
   onOpenProject,
   showProjects = true
 }: ChatRowProps): ReactElement {
   const [hover, setHover] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  /** Non-null while the row is being renamed in place, holding the text typed so far. */
+  const [draft, setDraft] = useState<string | null>(null)
 
   /* Recomputed on every render rather than kept in state — the parent re-renders on its poll tick,
      which is what advances these labels. */
   const age = relativeTime(conversation.lastActive)
+
+  /* Built once and used by both states of the row: the status dot and the project folders are facts
+     about the chat, not decoration on the label, so renaming must not take them away. */
+  const leading = (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', flex: '0 0 auto' }}>
+      <StatusDot status={conversation.status ?? 'idle'} />
+      {(showProjects ? conversation.projects ?? [] : []).map((project) => (
+        /* A span rather than a button: this already sits inside NavItem's <button>, and
+           nesting one inside another is invalid. Stopping propagation is what keeps the
+           folder from also selecting the chat. */
+        <span
+          key={project.id}
+          role="button"
+          tabIndex={-1}
+          title={`Open ${project.title}`}
+          onClick={(event) => {
+            event.stopPropagation()
+            onOpenProject(project.id)
+          }}
+          style={{ display: 'inline-flex', flex: '0 0 auto', cursor: 'pointer' }}
+        >
+          <ProjectFolder color={project.color} />
+        </span>
+      ))}
+    </span>
+  )
+
+  function commitRename(): void {
+    const next = (draft ?? '').trim()
+    setDraft(null)
+    /* An empty box is a cancelled rename rather than a request for an empty title. */
+    if (next && next !== conversation.title) onRename(next)
+  }
+
+  /* Renaming replaces the row rather than overlaying it, and reproduces NavItem's own geometry —
+     same height, padding and gap — so nothing in the list moves and the name is edited exactly
+     where it is read. */
+  if (draft !== null) {
+    return (
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: '9px',
+          width: '100%',
+          height: 'var(--row-height)',
+          padding: '0 8px',
+          boxSizing: 'border-box',
+          /* NavItem carries a transparent 1px border, which is part of where its content sits.
+             Without the same border here the leading slot moves a pixel the moment the box opens. */
+          border: '1px solid transparent',
+          borderRadius: 'var(--radius-sm)'
+        }}
+      >
+        {leading}
+        <input
+          autoFocus
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          onBlur={commitRename}
+          onKeyDown={(e) => {
+            if (e.key === 'Enter') commitRename()
+            /* Escape drops the edit without touching the name — clearing the draft closes the box,
+               so the blur that follows has nothing left to commit. */
+            if (e.key === 'Escape') setDraft(null)
+          }}
+          style={{
+            flex: '1 1 auto',
+            minWidth: 0,
+            height: '100%',
+            padding: 0,
+            background: 'transparent',
+            /* No border, no ring, no tint: the box is the row, and the caret is the only sign the
+               name is being edited. */
+            border: 'none',
+            color: 'var(--text-primary)',
+            fontFamily: 'var(--font-sans)',
+            fontSize: 'var(--text-base)',
+            fontWeight: 'var(--weight-medium)',
+            letterSpacing: 'var(--tracking-tight)',
+            outline: 'none',
+            /* Beats the global `*:focus-visible` ring in tokens.css, which would otherwise draw a
+               pill around the row the moment the box takes focus. */
+            boxShadow: 'none'
+          }}
+        />
+      </div>
+    )
+  }
 
   return (
     <div
@@ -350,29 +526,7 @@ function ChatRow({
       onMouseLeave={() => setHover(false)}
     >
       <NavItem
-        leading={
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', flex: '0 0 auto' }}>
-            <StatusDot status={conversation.status ?? 'idle'} />
-            {(showProjects ? conversation.projects ?? [] : []).map((project) => (
-              /* A span rather than a button: this already sits inside NavItem's <button>, and
-                 nesting one inside another is invalid. Stopping propagation is what keeps the
-                 folder from also selecting the chat. */
-              <span
-                key={project.id}
-                role="button"
-                tabIndex={-1}
-                title={`Open ${project.title}`}
-                onClick={(event) => {
-                  event.stopPropagation()
-                  onOpenProject(project.id)
-                }}
-                style={{ display: 'inline-flex', flex: '0 0 auto', cursor: 'pointer' }}
-              >
-                <ProjectFolder color={project.color} />
-              </span>
-            ))}
-          </span>
-        }
+        leading={leading}
         label={conversation.title}
         active={active}
         highlight={CHAT_ROW_HIGHLIGHT}
@@ -437,58 +591,31 @@ function ChatRow({
         </div>
       ) : null}
       {menuOpen ? (
-        <>
-          <div
-            style={{ position: 'fixed', inset: 0, zIndex: 10 }}
-            onClick={() => setMenuOpen(false)}
-          />
-          <div
-            style={{
-              position: 'absolute',
-              top: 'calc(var(--row-height) + 2px)',
-              right: 4,
-              zIndex: 11,
-              minWidth: 140,
-              padding: 'var(--space-2)',
-              background: '#20201F',
-              border: '1px solid var(--border-default)',
-              borderRadius: 'var(--radius-md)',
-              boxShadow: '0 8px 24px rgba(0,0,0,0.35)'
+        <RowMenu onDismiss={() => setMenuOpen(false)}>
+          <MenuItem
+            label="Lock name"
+            checked={conversation.titleLocked ?? false}
+            onSelect={() => {
+              setMenuOpen(false)
+              onToggleTitleLock()
             }}
-          >
-            <button
-              type="button"
-              onClick={() => {
-                setMenuOpen(false)
-                onDelete()
-              }}
-              style={{
-                display: 'block',
-                width: '100%',
-                boxSizing: 'border-box',
-                textAlign: 'left',
-                padding: '4px 8px',
-                background: 'transparent',
-                border: 'none',
-                borderRadius: 'var(--radius-sm)',
-                color: '#E6E5E2',
-                fontFamily: 'var(--font-sans)',
-                fontSize: 'var(--text-base)',
-                fontWeight: 'var(--weight-regular)',
-                lineHeight: 'var(--leading-normal)',
-                letterSpacing: 'var(--tracking-tight)',
-                cursor: 'pointer',
-                whiteSpace: 'nowrap',
-                overflow: 'hidden',
-                textOverflow: 'ellipsis'
-              }}
-              onMouseEnter={(e) => (e.currentTarget.style.background = 'var(--surface-hover)')}
-              onMouseLeave={(e) => (e.currentTarget.style.background = 'transparent')}
-            >
-              Delete
-            </button>
-          </div>
-        </>
+          />
+          <MenuItem
+            label="Rename"
+            onSelect={() => {
+              setMenuOpen(false)
+              setHover(false)
+              setDraft(conversation.title)
+            }}
+          />
+          <MenuItem
+            label="Delete"
+            onSelect={() => {
+              setMenuOpen(false)
+              onDelete()
+            }}
+          />
+        </RowMenu>
       ) : null}
     </div>
   )
@@ -500,6 +627,8 @@ export function Sidebar({
   onSelect,
   onNew,
   onDelete,
+  onRename,
+  onToggleTitleLock,
   projects,
   activeProjectId,
   onSelectProject,
@@ -742,6 +871,7 @@ export function Sidebar({
                     <GroupHeading
                       label={group.label}
                       color={group.color}
+                      folder={group.key !== 'loose'}
                       collapsed={isCollapsed(`people:${group.key}`)}
                       onToggle={() => toggleCollapsed(`people:${group.key}`)}
                     />
@@ -790,6 +920,7 @@ export function Sidebar({
                           </span>
                         }
                         label={person.name || 'Untitled'}
+                        meta={person.affiliation}
                         active={person.id === activePersonId}
                         optionsLabel="Person options"
                         onSelect={() => onSelectPerson(person.id)}
@@ -837,6 +968,7 @@ export function Sidebar({
                     <GroupHeading
                       label={group.label}
                       color={group.color}
+                      folder={group.key !== 'loose'}
                       collapsed={isCollapsed(`pages:${group.key}`)}
                       onToggle={() => toggleCollapsed(`pages:${group.key}`)}
                     />
@@ -915,7 +1047,9 @@ export function Sidebar({
                 {skills.map((skill) => (
                   <ManagedRow
                     key={skill.id}
-                    icon={skill.mode === 'persistent' ? 'pin' : 'blocks'}
+                    /* One glyph for every skill: the mode is a property of the skill, edited in its
+                       own view, not something the list is for. */
+                    icon="blocks"
                     label={skill.name || 'Untitled'}
                     active={skill.id === activeSkillId}
                     optionsLabel="Skill options"
@@ -961,6 +1095,7 @@ export function Sidebar({
                     <GroupHeading
                       label={group.label}
                       color={group.color}
+                      folder={group.key !== 'loose'}
                       collapsed={isCollapsed(`chats:${group.key}`)}
                       onToggle={() => toggleCollapsed(`chats:${group.key}`)}
                     />
@@ -974,6 +1109,8 @@ export function Sidebar({
                         active={c.id === activeId}
                         onSelect={() => onSelect(c.id)}
                         onDelete={() => onDelete(c.id)}
+                        onRename={(title) => onRename(c.id, title)}
+                        onToggleTitleLock={() => onToggleTitleLock(c.id)}
                         onOpenProject={onSelectProject}
                         /* Chips stay under Mixed, whose heading says only that there are several. */
                         showProjects={!chatsGrouped || group.key === 'mixed'}

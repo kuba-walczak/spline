@@ -9,6 +9,7 @@ import { Switch } from '@/components/ui/switch'
 import { blocksToMarkdown } from '@shared/markdown'
 import { listOrdinals } from '@/lib/listOrdinals'
 import { folderByItemId, folderMemberIds } from '@shared/context'
+import { parseAffiliations, serializeAffiliations } from '@shared/affiliations'
 import { normalizeNotionId, sameNotionId } from '@shared/notionId'
 import type { ContextFolder } from '@shared/context'
 import {
@@ -495,16 +496,18 @@ function ContextRow({
 /** One thing chosen from the add menu, and what list it came from. */
 interface ContextPick {
   id: string
-  kind: 'chat' | 'person'
+  kind: 'chat' | 'person' | 'page'
 }
 
 /** The "add context" menu: pick what kind of thing to attach, then which one.
 
-    Two levels rather than one flat list, because the three kinds behave differently — a chat and a
-    person are picked from what already exists, while "New" creates a page here and now. */
+    Two levels rather than one flat list. The three kinds are picked from what already exists — a
+    page is a row in Pages like the others, so one that exists is attached rather than made again —
+    and the rows below the rule make something new instead. */
 function AddContextMenu({
   chats,
   people,
+  pages,
   onAttach,
   onNew,
   onNewFolder,
@@ -512,7 +515,10 @@ function AddContextMenu({
   anchor
 }: {
   chats: Array<{ id: string; name: string }>
-  people: Array<{ id: string; name: string }>
+  /** `meta` is what a person is affiliated with, shown at the right of their row. */
+  people: Array<{ id: string; name: string; meta?: string }>
+  /** Every page not already in this project — or, inside a folder, not already in the folder. */
+  pages: Array<{ id: string; name: string }>
   /** Everything picked at once. A plain click sends one; a run of ctrl-clicks sends the lot when
       ctrl comes back up. */
   onAttach: (picks: ContextPick[]) => void
@@ -524,7 +530,7 @@ function AddContextMenu({
       because the panel it lives in clips its own overflow to keep its rounded corners. */
   anchor: DOMRect
 }): ReactElement {
-  const [kind, setKind] = useState<'chat' | 'person' | null>(null)
+  const [kind, setKind] = useState<'chat' | 'person' | 'page' | null>(null)
   /* What ctrl-clicking has marked so far, in the order it was picked. Held across a switch between
      the two lists, so a chat and a person can go in together. */
   const [marked, setMarked] = useState<ContextPick[]>([])
@@ -542,7 +548,10 @@ function AddContextMenu({
     return () => window.removeEventListener('keyup', onKeyUp)
   }, [marked, onAttach])
 
-  const list = kind === 'chat' ? chats : people
+  /* One row shape for all three lists: only a person carries a second column, and the others simply
+     leave it empty. */
+  const list: Array<{ id: string; name: string; meta?: string }> =
+    kind === 'chat' ? chats : kind === 'person' ? people : pages
   const panelStyle: CSSProperties = {
     zIndex: 61,
     padding: 'var(--space-2)',
@@ -569,35 +578,41 @@ function AddContextMenu({
         }}
       >
         <MenuItem
-          label="Chat"
+          label="Chats"
           trailing="chevron-right"
           active={kind === 'chat'}
           onHover={() => setKind('chat')}
           onClick={() => setKind('chat')}
         />
         <MenuItem
-          label="Person"
+          label="People"
           trailing="chevron-right"
           active={kind === 'person'}
           onHover={() => setKind('person')}
           onClick={() => setKind('person')}
         />
+        <MenuItem
+          label="Pages"
+          trailing="chevron-right"
+          active={kind === 'page'}
+          onHover={() => setKind('page')}
+          onClick={() => setKind('page')}
+        />
+        {/* Ruled off from the three above it: those name a list to attach from, these make something
+            that does not exist yet — a page, and somewhere to keep them — which is what the plus
+            says. */}
+        <div
+          style={{
+            height: 1,
+            margin: 'var(--space-2) calc(var(--space-2) * -1)',
+            background: 'var(--border-default)'
+          }}
+        />
         {/* Hovering a row with no list of its own closes whichever one is open, so the flyout tracks
             the pointer rather than lingering over an unrelated row. */}
-        <MenuItem label="Page" onHover={() => setKind(null)} onClick={onNew} />
-        {/* Ruled off from the three above it: those attach a piece of context, this one makes
-            somewhere to keep them. */}
+        <MenuItem label="Page" trailing="plus" onHover={() => setKind(null)} onClick={onNew} />
         {onNewFolder ? (
-          <>
-            <div
-              style={{
-                height: 1,
-                margin: 'var(--space-2) calc(var(--space-2) * -1)',
-                background: 'var(--border-default)'
-              }}
-            />
-            <MenuItem label="Folder" onHover={() => setKind(null)} onClick={onNewFolder} />
-          </>
+          <MenuItem label="Folder" trailing="plus" onHover={() => setKind(null)} onClick={onNewFolder} />
         ) : null}
 
         {/* Alongside rather than replacing, the way the effort menu sits beside the model menu — the
@@ -609,7 +624,17 @@ function AddContextMenu({
           {/* `menuscroll` rather than `chatscroll`: the same bar the chat window draws, without the
               stable gutter, which would inset both edges by 10px and leave this panel padded
               differently from the one it hangs off. */}
-          <div className="menuscroll" style={{ ...panelStyle, minWidth: 200, maxHeight: 260, overflowY: 'auto' }}>
+          {/* People get a wider, taller panel: their rows carry a name and an affiliation, and at the
+              width the other two lists want the two would be fighting over the same 200px. */}
+          <div
+            className="menuscroll"
+            style={{
+              ...panelStyle,
+              minWidth: kind === 'person' ? 340 : 200,
+              maxHeight: kind === 'person' ? 380 : 260,
+              overflowY: 'auto'
+            }}
+          >
             {list.length === 0 ? (
               <div
                 style={{
@@ -620,13 +645,18 @@ function AddContextMenu({
                   whiteSpace: 'nowrap'
                 }}
               >
-                {kind === 'chat' ? 'No other chats' : 'No people yet'}
+                {kind === 'chat'
+                  ? 'No other chats'
+                  : kind === 'person'
+                    ? 'No people yet'
+                    : 'No other pages'}
               </div>
             ) : (
               list.map((entry) => (
                 <MenuItem
                   key={entry.id}
                   label={entry.name || 'Untitled'}
+                  meta={entry.meta}
                   selected={marked.some((pick) => pick.id === entry.id)}
                   onClick={(event) => {
                     const pick: ContextPick = { id: entry.id, kind: kind ?? 'chat' }
@@ -657,6 +687,7 @@ function AddContextMenu({
 /** One row of the add-context menu, styled after the chat row's options menu in the sidebar. */
 function MenuItem({
   label,
+  meta,
   trailing,
   active,
   selected,
@@ -664,7 +695,10 @@ function MenuItem({
   onClick
 }: {
   label: string
-  /** A chevron on the rows that open a list beside the menu. */
+  /** A quiet second column at the right of the row — a person's affiliations. */
+  meta?: string
+  /** The glyph at the row's right edge: a chevron on the rows that open a list beside the menu, a
+      plus on the ones that make something. */
   trailing?: string
   active?: boolean
   /** Marked by a ctrl-click and waiting to be sent, rather than acted on already. */
@@ -711,6 +745,22 @@ function MenuItem({
       onMouseLeave={(e) => (e.currentTarget.style.background = background)}
     >
       <span style={{ flex: '1 1 auto', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</span>
+      {meta ? (
+        <span
+          style={{
+            flex: '0 1 auto',
+            minWidth: 0,
+            maxWidth: '50%',
+            font: 'var(--type-meta)',
+            letterSpacing: 'var(--tracking-tight)',
+            color: 'var(--text-faint)',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis'
+          }}
+        >
+          {meta}
+        </span>
+      ) : null}
       {selected ? (
         <span style={{ display: 'inline-flex', flex: '0 0 auto', color: 'var(--text-primary)' }}>
           <Icon name="check" size={14} />
@@ -1509,7 +1559,8 @@ export default function ProjectDetailView({
   /* Everything attachable, loaded when the menu is first opened rather than with the project — the
      lists are only ever seen from inside the menu. */
   const [allChats, setAllChats] = useState<Array<{ id: string; name: string }>>([])
-  const [allPeople, setAllPeople] = useState<Array<{ id: string; name: string }>>([])
+  const [allPeople, setAllPeople] = useState<Array<{ id: string; name: string; affiliation: string }>>([])
+  const [allPages, setAllPages] = useState<Array<{ id: string; title: string }>>([])
   const [contextDetail, setContextDetail] = useState<ProjectDetail | null>(null)
   const [contextLoading, setContextLoading] = useState(false)
   const [contextError, setContextError] = useState(false)
@@ -1654,6 +1705,11 @@ export default function ProjectDetailView({
       .getPeople()
       .then(setAllPeople)
       .catch((err) => console.error('[project] getPeople failed:', err))
+
+    window.api
+      .getPages()
+      .then(setAllPages)
+      .catch((err) => console.error('[project] getPages failed:', err))
   }
 
   /** Attaches everything picked in one go, then re-reads the project once.
@@ -1807,9 +1863,20 @@ export default function ProjectDetailView({
   const attachableChats = allChats.filter((c) =>
     openFolder ? !inOpenFolder(c.id) : !chats.some((attached) => sameNotionId(attached.id, c.id))
   )
-  const attachablePeople = allPeople.filter((p) =>
-    openFolder ? !inOpenFolder(p.id) : !people.some((attached) => sameNotionId(attached.id, p.id))
-  )
+  const attachablePeople = allPeople
+    .filter((p) => (openFolder ? !inOpenFolder(p.id) : !people.some((attached) => sameNotionId(attached.id, p.id))))
+    /* Read and rewritten rather than passed through, so a column spaced by hand in Notion still
+       reads as one list here. */
+    .map((p) => ({ id: p.id, name: p.name, meta: serializeAffiliations(parseAffiliations(p.affiliation)) }))
+  /* A page filed in one of this project's folders is in the project too, so it is not offered again
+     at the top level — unlike a chat or a person, an attached page is not one list but two: the
+     project's own blocks, and whatever its folders hold. */
+  const inProject = (id: string): boolean =>
+    recents.some((r) => sameNotionId(r.id, id)) ||
+    folders.some((f) => folderMemberIds(f).some((member) => sameNotionId(member, id)))
+  const attachablePages = allPages
+    .filter((p) => (openFolder ? !inOpenFolder(p.id) : !inProject(p.id)))
+    .map((p) => ({ id: p.id, name: p.title }))
 
   /* Every attached thing, folder or no folder. What the panel shows is a slice of this: the ones
      filed under the open folder, or the unfiled ones plus a card per folder. */
@@ -2313,6 +2380,7 @@ export default function ProjectDetailView({
                         anchor={addAnchor}
                         chats={attachableChats}
                         people={attachablePeople}
+                        pages={attachablePages}
                         onAttach={(picks) => {
                           setAddAnchor(null)
                           void attachMany(picks)

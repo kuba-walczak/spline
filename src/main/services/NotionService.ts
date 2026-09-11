@@ -7,6 +7,7 @@ import { EMPTY_CONFIG, parseConfig, serializeConfig, type AppConfig } from '../.
 import { blocksToMarkdown, markdownToBlocks, type MarkdownBlock } from '../../shared/markdown'
 import { EMPTY_SKILL_DATA, type Skill, type SkillData } from '../../shared/skills'
 import { isNotionId, normalizeNotionId, sameNotionId } from '../../shared/notionId'
+import { parseAffiliations, serializeAffiliations } from '../../shared/affiliations'
 
 const NOTION_VERSION = '2025-09-03'
 const CHATS_DATA_SOURCE_ID = 'efe919c7-c9c1-404e-ac41-2b5210790815'
@@ -1234,6 +1235,22 @@ export async function fetchProjectDetail(pageId: string): Promise<ProjectDetail>
     }
 }
 
+/** The injectable text of a page: its blocks, one per line. Child pages are left out — a page
+    inside this one is its own piece of context — and so are images, which carry nothing to read.
+    Used for a context page and for a person's page alike, since a person is context in the same
+    way: their page is what is known about them. */
+async function pageBodyText(pageId: string): Promise<string> {
+    const children = await fetchBlockChildren(pageId)
+    return children
+        .map(toDetailBlock)
+        .filter(
+            (b): b is ProjectDetailBlock =>
+                b !== null && b.type !== 'child_page' && b.type !== 'image' && b.text.trim().length > 0
+        )
+        .map((b) => b.text)
+        .join('\n')
+}
+
 /** Flattens a chat's session transcript to plain text, alternating "User:"/"Assistant:" lines.
     Injected context is dropped — a project quoting its own instructions back at itself is noise. */
 function chatToText(sessionId: string): string {
@@ -1294,16 +1311,24 @@ export async function fetchProjectVersion(projectId: string, excludeSessionId?: 
        unlike a nested page it is not even a grandchild of the project. The Pages listing carries
        every page's stamp, so covering them all costs the one request. */
     const pages = await fetchPages()
-    const linkedPages = linked
-        .concat(folderLinks)
+    const linkedIds = linked.concat(folderLinks)
+    const linkedPages = linkedIds
         .map((id) => pageById(pages, id))
         .filter((page): page is PageEntry => page !== undefined)
+
+    /* A person is a row of their own too, and their page is what the context carries — so without
+       their stamp here, editing a person left every project they are in looking fresh and the
+       prompt was never rebuilt. The People listing covers them all in the one request, and is
+       skipped entirely by a project that links to nothing. */
+    const roster = linkedIds.length > 0 ? await fetchPeople() : []
+    const linkedPeople = roster.filter((person) => linkedIds.some((id) => sameNotionId(id, person.id)))
 
     const stamps = [
         page.last_edited_time ?? null,
         ...blocks.filter((b) => b.type === 'child_page').map((b) => b.last_edited_time ?? null),
         ...folderStamps,
         ...linkedPages.map((page) => page.lastEdited),
+        ...linkedPeople.map((person) => person.lastEdited),
         /* The excluded chat is excluded here too, or sending a message would restamp the project it
            belongs to, and the next send would rebuild a prompt that does not contain it anyway. */
         ...chatLog
@@ -1337,16 +1362,30 @@ export async function fetchProjectContext(projectId: string, excludeSessionId?: 
     const folderOf = folderByItemId(detail.folders)
 
     const pageTexts = await Promise.all(
-        contextPages.map(async (page) => {
-            const children = await fetchBlockChildren(page.id)
-            const text = children
-                .map(toDetailBlock)
-                .filter((b): b is ProjectDetailBlock => b !== null && b.type !== 'child_page' && b.type !== 'image' && b.text.trim().length > 0)
-                .map((b) => b.text)
-                .join('\n')
-            return { id: page.id, title: page.title || 'Untitled', text }
-        })
+        contextPages.map(async (page) => ({
+            id: page.id,
+            title: page.title || 'Untitled',
+            text: await pageBodyText(page.id)
+        }))
     )
+
+    /* People are context the same way pages are — they are shown in the project's Context section
+       and were the one kind of item this never read, so a project's people said nothing to the
+       model. Their page is what is known about them; their affiliations are the one fact the row
+       itself carries, so those go in the heading rather than being dropped. */
+    const peopleTexts = await Promise.all(
+        detail.people.map(async (person) => ({
+            id: person.id,
+            title: person.name || 'Untitled',
+            affiliations: serializeAffiliations(parseAffiliations(person.affiliation)),
+            text: await pageBodyText(person.id)
+        }))
+    )
+
+    /* A person with an empty page still says something by being attached — who they are, and what
+       they are affiliated with. One with neither says nothing, and is left out the way an empty page
+       is. */
+    const carriedPeople = peopleTexts.filter((p) => p.text.trim() || p.affiliations)
 
     /* The chat this context is being assembled for is left out of it. Continuing a chat resumes its
        session, so the CLI already holds the conversation; injecting it as well would send every turn
@@ -1359,10 +1398,12 @@ export async function fetchProjectContext(projectId: string, excludeSessionId?: 
             text: chat.sessionId ? chatToText(chat.sessionId) : ''
         }))
 
-    /** `page "Notes"`, or `page "Notes" (in folder "Research")` for one that has been filed. */
-    function describe(kind: string, title: string, id: string): string {
+    /** `page "Notes"`, or `page "Notes" (in folder "Research")` for one that has been filed.
+        `detail` carries what else names the item — a person's affiliations. */
+    function describe(kind: string, title: string, id: string, detail?: string): string {
         const folder = folderOf.get(normalizeNotionId(id))
-        return folder ? `${kind} "${title}" (in folder "${folder.name || 'Untitled'}")` : `${kind} "${title}"`
+        const named = detail ? `${kind} "${title}" (${detail})` : `${kind} "${title}"`
+        return folder ? `${named} (in folder "${folder.name || 'Untitled'}")` : named
     }
 
     const parts: string[] = []
@@ -1376,11 +1417,15 @@ export async function fetchProjectContext(projectId: string, excludeSessionId?: 
         pageTexts
             .filter((p) => p.text.trim())
             .map((p) => normalizeNotionId(p.id))
+            .concat(carriedPeople.map((p) => normalizeNotionId(p.id)))
             .concat(chatTexts.filter((c) => c.text.trim()).map((c) => normalizeNotionId(c.id)))
     )
     const nameOf = new Map<string, string>(
         pageTexts
             .map((p) => [normalizeNotionId(p.id), `page "${p.title}"`] as [string, string])
+            .concat(
+                peopleTexts.map((p) => [normalizeNotionId(p.id), `person "${p.title}"`] as [string, string])
+            )
             .concat(
                 chatTexts.map(
                     (c) => [normalizeNotionId(c.id), `past conversation "${c.title}"`] as [string, string]
@@ -1408,6 +1453,16 @@ export async function fetchProjectContext(projectId: string, excludeSessionId?: 
 
     for (const p of pageTexts) {
         if (p.text.trim()) parts.push(`${describe('page', p.title, p.id)}:\n${p.text.trim()}`)
+    }
+    /* Named as somebody the user knows rather than as a participant: a person's page is notes about
+       them, and without saying so a description reads as though they were in the conversation. */
+    for (const p of carriedPeople) {
+        const heading = describe('person', p.title, p.id, p.affiliations || undefined)
+        parts.push(
+            p.text.trim()
+                ? `${heading} — somebody the user knows, described here:\n${p.text.trim()}`
+                : `${heading} — somebody the user knows.`
+        )
     }
     /* An attached chat is somebody's finished conversation, not a queue. Without saying so, its
        `User:` lines read as requests still waiting to be answered — the same way a bare list of
@@ -1595,11 +1650,13 @@ export interface PersonEntry {
     name: string
     /** Where they are from — a company, a school, a team. Empty until somebody fills the column. */
     affiliation: string
+    /** For `fetchProjectVersion`: a person linked to a project is a row of their own, so editing
+        their page leaves the project's own stamp untouched. */
+    lastEdited: string | null
 }
 
 export interface PersonDetail extends PersonEntry {
     blocks: ProjectDetailBlock[]
-    lastEdited: string | null
 }
 
 /** The list for the sidebar: what the columns hold, so opening the section costs one request. The
@@ -1618,7 +1675,8 @@ export async function fetchPeople(): Promise<PersonEntry[]> {
     return data.results.map((page) => ({
         id: page.id,
         name: pageTitle(page.properties),
-        affiliation: scalarProperty(page, 'Affiliation') ?? ''
+        affiliation: scalarProperty(page, 'Affiliation') ?? '',
+        lastEdited: page.last_edited_time ?? null
     }))
 }
 
