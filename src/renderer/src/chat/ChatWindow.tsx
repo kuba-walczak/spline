@@ -7,6 +7,7 @@ import { SettingsModal } from './SettingsModal'
 import { ProjectContextModal } from './ProjectContextModal'
 import { InjectionModal } from '@/components/ui/injection-modal'
 import { loadActiveSkills, saveActiveSkills } from '@/lib/activeSkills'
+import { cancelSpeech, endSpeechTurn, feedSpeech, setSpeechOptions } from '@/lib/speech'
 import { loadTitleLocks, saveTitleLock } from '@/lib/titleLock'
 import { usageFromEvent } from '@shared/tokenUsage'
 import ProjectDetailView from './ProjectDetailView'
@@ -21,6 +22,9 @@ import PersonDetailView from './PersonDetailView'
 import PageDetailView from './PageDetailView'
 import { outcomeFromToolResult, type ToolOutcome } from '@shared/toolResults'
 import type { SessionStatus } from './Sidebar'
+
+/** Off, dictating, or in voice mode — never two at once. */
+type VoiceMode = 'off' | 'dictate' | 'voice'
 
 /* Implementation of `Chat Window.dc.html` from the Claude app design system.
 
@@ -521,6 +525,22 @@ function resultsFromEvent(event: Record<string, unknown>): Map<string, ToolOutco
   return found
 }
 
+/** The reply text carried by one partial-message line, or '' for the many kinds that carry none.
+
+    Written defensively because the shape is the CLI's rather than ours, so an unrecognised variant
+    has to read as "no text". The `text_delta` check in particular is not a formality: the same
+    stream carries `thinking_delta`, and the model's reasoning typed into the bubble — and read
+    aloud — is exactly what accepting any delta would produce. */
+function textDeltaOf(event: Record<string, unknown>): string {
+  if (event.type !== 'stream_event') return ''
+  /* A subagent's tokens are not this chat's reply. Nothing spawns one today; this keeps it true. */
+  if (event.parent_tool_use_id != null) return ''
+  const inner = event.event as { type?: string; delta?: { type?: string; text?: unknown } } | undefined
+  if (inner?.type !== 'content_block_delta') return ''
+  if (inner.delta?.type !== 'text_delta') return ''
+  return typeof inner.delta.text === 'string' ? inner.delta.text : ''
+}
+
 function formatEvent(event: Record<string, unknown>): MessagePart[] {
   if (event.type === 'assistant') {
     const content = (event.message as { content?: ContentBlock[] } | undefined)?.content ?? []
@@ -534,11 +554,10 @@ function formatEvent(event: Record<string, unknown>): MessagePart[] {
       }))
   }
 
-  if (event.type === 'result') {
-    const result = event as { is_error?: boolean; result?: string }
-    return result.is_error ? [] : textPart(result.result ?? '')
-  }
-
+  /* `result` used to be where the whole reply arrived. It is streamed now, so emitting it here as
+     well would print every reply twice. The one case that still needs it — a turn that streamed
+     nothing at all — is handled in the subscription, which can see what this turn already put on
+     screen and so cannot double-print. */
   return []
 }
 
@@ -622,6 +641,103 @@ export default function ChatWindow({
   }, [pendingSkill])
   const [draft, setDraft] = useState('')
   const [streamingId, setStreamingId] = useState<number | null>(null)
+  /* Dictation and voice mode share one microphone and one transcript, so they are one setting with
+     three positions rather than two switches: turning either on turns the other off. The difference
+     between the two is one line further down — voice mode acts on the pause, dictation ignores it. */
+  const [voiceMode, setVoiceMode] = useState<VoiceMode>('off')
+  /* What the subscription below reads the mode from. It is mounted once, so it cannot see the state,
+     and the alternative — resubscribing on every toggle — would drop events across the gap. */
+  const voiceModeRef = useRef<VoiceMode>('off')
+  /** Set when the listener reports the pause that ends a spoken message, rather than sending there
+      and then: see the effect below for why the send cannot happen in the handler. */
+  const [autoSend, setAutoSend] = useState(false)
+  /** Whether the listener is loaded and running. Both models take a second or two, and a mic that
+      never opened never will — either way a button that looks ready would be lying. */
+  const [voiceAvailable, setVoiceAvailable] = useState(false)
+
+  /* The listener needs to know only whether to transcribe; which of the two modes asked is the
+     renderer's business alone. One push point, so there is one answer to what it was last told. */
+  useEffect(() => {
+    voiceModeRef.current = voiceMode
+    window.api.setVoiceListening(voiceMode !== 'off')
+    /* Replies are read only in voice mode: dictation is for putting words in the box, not for
+       holding a conversation. This effect already owns what the listener was last told, and the
+       speaker belongs with it. */
+    setSpeechOptions({ enabled: voiceMode === 'voice' })
+    if (voiceMode !== 'voice') cancelSpeech()
+  }, [voiceMode])
+
+  /* Kept apart from the push above so that changing mode does not switch the listener off and
+     immediately back on. This runs when the chat itself goes away, and a microphone transcribing
+     into a composer that no longer exists is what it is there to prevent. */
+  useEffect(
+    () => () => {
+      window.api.setVoiceListening(false)
+      cancelSpeech()
+    },
+    []
+  )
+
+  useEffect(() => {
+    return window.api.onVoiceEvent((event) => {
+      if (event.kind === 'status') {
+        setVoiceAvailable(event.available)
+        /* The main process switches the listener off whenever nobody is left owning the mode — a
+           reload, a closed window, a dead worker. Follow it rather than argue with it: the
+           microphone really has stopped, whatever the buttons were showing. */
+        if (!event.listening) setVoiceMode('off')
+        return
+      }
+      if (event.kind === 'wake') {
+        /* Either direction is a new intent, and neither is served by being talked over. */
+        cancelSpeech()
+        /* The wake word only ever means voice mode, so hearing it while dictating switches over
+           rather than off. Functional, so this handler never has to know the current mode. */
+        setVoiceMode((prev) => (prev === 'voice' ? 'off' : 'voice'))
+        return
+      }
+      if (event.kind === 'segment') {
+        /* The user is talking, so stop reading at them. First and unconditionally: cancelling is
+           synchronous and cheap, and it must not queue behind the mode check below. */
+        cancelSpeech()
+        /* A phrase transcribed from audio caught just before the mode went off still arrives a
+           moment later. Dropping it here is what makes switching off take effect on the word. */
+        if (voiceModeRef.current === 'off') return
+        setDraft((prev) => (prev.trimEnd() ? `${prev.trimEnd()} ${event.text}` : event.text))
+        return
+      }
+      /* Acted on in the effect below rather than here, and left to it to decide whether this mode
+         cares about a pause at all. */
+      if (event.kind === 'silence') setAutoSend(true)
+    })
+  }, [])
+
+  /* The pause that ends a spoken message and the phrase that pause closed arrive as two separate
+     events, so calling `send` from the handler could send a draft still missing its last few words.
+     A flag read from an effect cannot: this body runs after the commit, so `draft` is whatever the
+     segment left there — whether the two landed in one render or in two.
+
+     `streamingId` is a dependency for the same reason it is a guard. A pause that falls while a
+     reply is still streaming leaves the flag standing, and this runs again of its own accord the
+     moment that reply finishes, which is what holds the message instead of losing it. */
+  useEffect(() => {
+    if (!autoSend) return
+    /* Dictation hears the same pause and does nothing with it; clearing the flag here is what stops
+       it going off the next time voice mode is switched on. */
+    if (voiceMode !== 'voice') {
+      setAutoSend(false)
+      return
+    }
+    if (streamingId !== null) return
+    /* Cleared before sending, so a re-render during the awaits inside `send` cannot send twice. */
+    setAutoSend(false)
+    if (!draft.trim()) return
+    void send()
+  }, [autoSend, voiceMode, streamingId, draft])
+
+  function toggleVoiceMode(mode: Exclude<VoiceMode, 'off'>): void {
+    setVoiceMode((prev) => (prev === mode ? 'off' : mode))
+  }
   /* Model and effort belong to a chat, not the app. These hold the choice for whichever chat is
      open, and seed the next new one so picking a model carries forward the way a user expects. */
   /** Process lifecycle per session id, driving each sidebar row's dot. Absent means idle. */
@@ -721,6 +837,15 @@ export default function ChatWindow({
   const timer = useRef<ReturnType<typeof setInterval> | null>(null)
   const streamTarget = useRef<{ conversationId: number; botId: number; sessionId: string } | null>(null)
   const streamParts = useRef<MessagePart[]>([])
+  /* Text deltas arrive one per token. Committing each one would re-render this whole tree and
+     re-pin the scroll fifty to a hundred times a second, so they are buffered and flushed on a
+     timer instead. A timer rather than an animation frame: rAF does not fire while the window is
+     minimised, and a reply that stops streaming — and stops being read aloud — because the window
+     is in the background is precisely the case voice mode exists for. */
+  const deltaBuffer = useRef('')
+  const deltaTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** Whether this turn is to be read aloud, decided once when it is sent. */
+  const speakThisTurn = useRef(false)
   const conversationsRef = useRef<Conversation[]>([])
   const notionChatsRef = useRef<Conversation[]>([])
   const pendingPageId = useRef(new Map<number, Promise<string>>())
@@ -947,6 +1072,20 @@ export default function ChatWindow({
     }, pollSeconds * 1000)
     return () => window.clearInterval(handle)
   }, [pollSeconds])
+
+  /* The stored voice and rate, pushed to the speaker. `loadConfig` runs at mount and again after a
+     sync, so a change in Settings lands without a reload. */
+  useEffect(() => {
+    setSpeechOptions({ voiceName: config.speechVoice, rate: config.speechRate })
+  }, [config.speechVoice, config.speechRate])
+
+  /* Reading out a chat that has been left is wrong, and clearing the permission matters as much as
+     stopping: `streamTarget` is keyed on the session rather than on what is on screen, so a turn
+     left behind keeps streaming and would otherwise keep talking. */
+  useEffect(() => {
+    cancelSpeech()
+    speakThisTurn.current = false
+  }, [activeId, route])
 
   useEffect(() => {
     void loadConfig()
@@ -1176,10 +1315,37 @@ export default function ChatWindow({
     return window.api.onClaudeEvent(({ sessionId, event }) => {
       const target = streamTarget.current
       if (!target || target.sessionId !== sessionId) return
+
+      /* The hot path, one line per token. Everything below is a landmark by comparison. */
+      if (event.type === 'stream_event') {
+        bufferDelta(target, textDeltaOf(event))
+        return
+      }
+
+      /* Any other event is a position in the reply, so the text buffered up to here is committed
+         before it — which is what keeps a tool badge after the sentence that introduced it. */
+      flushDeltas(target)
+
       /* Results answer a call that is already on screen, so they update an existing badge rather
          than appending a new part. */
       const results = resultsFromEvent(event)
       if (results.size > 0) attachToolResults(target, results)
+
+      if (event.type === 'result') {
+        const result = event as { is_error?: boolean; result?: string }
+        /* The whole reply, but only for a turn that streamed none of it — a CLI without the flag,
+           or an answer with no assistant message behind it. `streamParts` is the record of what
+           this turn has already put on screen, so this cannot print anything twice. Errors are
+           left alone: they reach the user through the rejected promise in `send`. */
+        if (!result.is_error && !textOf(streamParts.current).trim()) {
+          const whole = result.result ?? ''
+          if (whole) {
+            appendParts(target, textPart(whole))
+            if (speakThisTurn.current) feedSpeech(whole)
+          }
+        }
+        return
+      }
 
       const parts = formatEvent(event)
       if (parts.length > 0) appendParts(target, parts)
@@ -1244,6 +1410,37 @@ export default function ChatWindow({
       ...c,
       messages: c.messages.map((m) => (m.id === target.botId ? { ...m, parts: mergeParts(m.parts, newParts) } : m))
     }))
+  }
+
+  /** How long token deltas are allowed to pile up before they are committed. About sixteen
+      renders a second: fast enough to read as typing, slow enough that the tree is not rebuilt
+      per token. */
+  const DELTA_FLUSH_MS = 60
+
+  function bufferDelta(
+    target: { conversationId: number; botId: number; sessionId: string },
+    text: string
+  ): void {
+    if (!text) return
+    deltaBuffer.current += text
+    if (deltaTimer.current === null) {
+      deltaTimer.current = setTimeout(() => flushDeltas(target), DELTA_FLUSH_MS)
+    }
+  }
+
+  /** Commits whatever has been buffered. Idempotent, because it is called on every landmark event,
+      on the error path and at the end of the turn. */
+  function flushDeltas(target: { conversationId: number; botId: number; sessionId: string }): void {
+    if (deltaTimer.current !== null) {
+      clearTimeout(deltaTimer.current)
+      deltaTimer.current = null
+    }
+    const text = deltaBuffer.current
+    if (!text) return
+    deltaBuffer.current = ''
+    appendParts(target, textPart(text))
+    /* Fed after the text is on screen, so what is heard never runs ahead of what is shown. */
+    if (speakThisTurn.current) feedSpeech(text)
   }
 
   function clearTimer(): void {
@@ -1313,6 +1510,8 @@ export default function ChatWindow({
     ])
     setActiveId(id)
     setDraft('')
+    /* A pause heard in the chat just left was about a message that no longer exists. */
+    setAutoSend(false)
     setRoute('home')
 
     const pagePromise = window.api
@@ -1684,6 +1883,9 @@ export default function ChatWindow({
   async function send(): Promise<void> {
     const text = draft.trim()
     if (!text || streamingId !== null) return
+    /* The previous reply is stale the moment another question is asked. Covers the Enter key and
+       the voice-mode auto-send alike, since both arrive here. */
+    cancelSpeech()
 
     const conversationId = activeId ?? createConversation()
     const conv = allConversations.find((c) => c.id === conversationId) ?? null
@@ -1808,13 +2010,26 @@ export default function ChatWindow({
 
     if (!onSend) return
 
-    streamTarget.current = { conversationId, botId, sessionId }
+    const target = { conversationId, botId, sessionId }
+    streamTarget.current = target
     streamParts.current = []
+    deltaBuffer.current = ''
+    /* Decided once, here, rather than read as each sentence lands. Switching voice mode off does
+       stop the reply being read — through `setSpeechOptions` — but a turn that began silently must
+       not start talking because voice mode came on halfway through it. */
+    speakThisTurn.current = voiceModeRef.current === 'voice'
     try {
       await onSend(sessionId, sendText, conv?.model ?? modelId, conv?.effort ?? effortId, systemPrompt)
     } catch (error) {
+      /* Flushed first, so the streamed tail stays ahead of the diagnostic. */
+      flushDeltas(target)
       appendParts({ conversationId, botId, sessionId }, textPart(`\nSomething went wrong: ${String(error)}`))
     } finally {
+      flushDeltas(target)
+      /* Speaks the last sentence, which has no full stop of its own to announce it. The error text
+         above is deliberately left unspoken: that is this app talking, not the model. */
+      endSpeechTurn()
+      speakThisTurn.current = false
       streamTarget.current = null
       setStreamingId(null)
     }
@@ -2247,7 +2462,12 @@ export default function ChatWindow({
                     >
                       <div style={m.role === 'user' ? userBubbleStyle : botBubbleStyle}>
                         {renderParts(m.parts)}
-                        {streamingHere && last && m.id === last.id ? <Thinking /> : null}
+                        {/* Only until the reply starts arriving. Text streams in now, so leaving
+                            this up would print "Thinking" hard against the half-written sentence —
+                            and once there are words on screen it is not telling anyone anything. */}
+                        {streamingHere && last && m.id === last.id && m.parts.length === 0 ? (
+                          <Thinking />
+                        ) : null}
                       </div>
                     </div>
                   </div>
@@ -2300,6 +2520,11 @@ export default function ChatWindow({
             onClearPendingSkill={() => setPendingSkill(null)}
             onOpenPendingSkill={() => setShowPendingSkill(true)}
             contextTokens={active ? (contextTokens[active.sessionId] ?? null) : null}
+            onDictate={() => toggleVoiceMode('dictate')}
+            onVoice={() => toggleVoiceMode('voice')}
+            dictateActive={voiceMode === 'dictate'}
+            voiceActive={voiceMode === 'voice'}
+            voiceAvailable={voiceAvailable}
             style={{ maxWidth: 'var(--container)', minHeight: '104px' }}
           />
         </div>

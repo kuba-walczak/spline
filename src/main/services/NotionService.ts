@@ -4,7 +4,12 @@ import { CONTEXT_SEPARATOR } from '../../shared/injection'
 import { folderByItemId, folderMemberIds, folderName, folderTitle, isFolderTitle } from '../../shared/context'
 import type { ContextFolder } from '../../shared/context'
 import { EMPTY_CONFIG, parseConfig, serializeConfig, type AppConfig } from '../../shared/config'
-import { blocksToMarkdown, markdownToBlocks, type MarkdownBlock } from '../../shared/markdown'
+import {
+    blocksToMarkdown,
+    markdownToBlocks,
+    tableToMarkdown,
+    type MarkdownBlock
+} from '../../shared/markdown'
 import { EMPTY_SKILL_DATA, type Skill, type SkillData } from '../../shared/skills'
 import { isNotionId, normalizeNotionId, sameNotionId } from '../../shared/notionId'
 import { parseAffiliations, serializeAffiliations } from '../../shared/affiliations'
@@ -215,6 +220,10 @@ interface NotionBlock {
         external?: { url: string }
         caption?: NotionRichText[]
     }
+    /* A table holds its width and its header flags, and nothing else: the cells are in `table_row`
+       children, which is why a table costs a second request to read. */
+    table?: { table_width?: number; has_column_header?: boolean; has_row_header?: boolean }
+    table_row?: { cells?: NotionRichText[][] }
     /* Reading one arm by name, for the walk over every kind of block that can hold a mention. */
     [key: string]: unknown
 }
@@ -452,7 +461,8 @@ const DETAIL_BLOCK_TYPES = [
     'code',
     'divider',
     'child_page',
-    'image'
+    'image',
+    'table'
 ] as const
 
 export interface ProjectDetailBlock {
@@ -461,9 +471,34 @@ export interface ProjectDetailBlock {
     text: string
     checked?: boolean
     url?: string
+    /** `table` only: every row, the header included when there is one. */
+    rows?: string[][]
+    /** `table` only: whether the first of `rows` is the column header. */
+    hasColumnHeader?: boolean
 }
 
-function toDetailBlock(block: NotionBlock): ProjectDetailBlock | null {
+/** Every table's rows, by the id of the table block they belong to.
+
+    A table's cells are `table_row` children of the table, and the children endpoint returns one
+    level at a time, so a table costs a request of its own. Gathered here, in parallel, rather than
+    at each of the places a page's blocks are read — and a page holding no table costs nothing. */
+async function fetchTableRows(blocks: NotionBlock[]): Promise<Map<string, string[][]>> {
+    const tables = blocks.filter((block) => block.type === 'table')
+    if (tables.length === 0) return new Map()
+
+    const read = await Promise.all(
+        tables.map(async (table) => {
+            const rows = (await fetchBlockChildren(table.id))
+                .filter((child) => child.type === 'table_row')
+                .map((child) => (child.table_row?.cells ?? []).map((cell) => plainText(cell)))
+            return [table.id, rows] as [string, string[][]]
+        })
+    )
+
+    return new Map(read)
+}
+
+function toDetailBlock(block: NotionBlock, tableRows?: Map<string, string[][]>): ProjectDetailBlock | null {
     if (!(DETAIL_BLOCK_TYPES as readonly string[]).includes(block.type)) return null
 
     switch (block.type) {
@@ -501,6 +536,22 @@ function toDetailBlock(block: NotionBlock): ProjectDetailBlock | null {
                 text: plainText(block.image?.caption),
                 url: imageUrl(block)
             }
+        case 'table': {
+            /* Empty when the rows were not read — every caller does read them, and a table that
+               came back rowless is written out as nothing rather than as an empty grid. */
+            const rows = tableRows?.get(block.id) ?? []
+            const hasColumnHeader = block.table?.has_column_header ?? false
+            return {
+                id: block.id,
+                type: 'table',
+                /* The markdown spelling, so a table reads as a table everywhere a block's `text` is
+                   what gets used — the injected project context above all, where it is the whole of
+                   what the model is given of it. */
+                text: rows.length > 0 ? tableToMarkdown(rows, hasColumnHeader).join('\n') : '',
+                rows,
+                hasColumnHeader
+            }
+        }
         default:
             return { id: block.id, type: 'paragraph', text: plainText(block.paragraph?.rich_text) }
     }
@@ -511,10 +562,14 @@ function toDetailBlock(block: NotionBlock): ProjectDetailBlock | null {
     linked page and a page still nested from before arrive the same way, and nothing downstream has
     to know which is which. A link naming anything else — a chat, a person — is not a block at all
     and drops out here, as it did before there was anything to resolve it against. */
-function toDetailBlocks(blocks: NotionBlock[], pages: PageEntry[]): ProjectDetailBlock[] {
+function toDetailBlocks(
+    blocks: NotionBlock[],
+    pages: PageEntry[],
+    tableRows?: Map<string, string[][]>
+): ProjectDetailBlock[] {
     return blocks
         .map((block) => {
-            if (block.type !== 'link_to_page') return toDetailBlock(block)
+            if (block.type !== 'link_to_page') return toDetailBlock(block, tableRows)
 
             const target = block.link_to_page?.page_id
             const page = target ? pageById(pages, target) : undefined
@@ -701,6 +756,37 @@ function toNotionBlock(block: MarkdownBlock): Record<string, unknown> | null {
                 image: { type: 'external', external: { url: block.url }, caption: rich_text }
             }
         }
+        case 'table': {
+            const rows = block.rows ?? []
+            /* Notion will not take a table with no rows, and a table of no columns is not a table.
+               Both come back from the parser only if the markdown named one and then said nothing
+               about it, which is better dropped than written as an empty grid. */
+            if (rows.length === 0 || rows[0].length === 0) return null
+
+            /* The rows go in as the table's own children rather than being appended after it: a
+               table's width is fixed when it is created and cannot be changed afterwards, so Notion
+               wants the rows that establish it in the same request. Two levels of nesting, which is
+               the most one create call may carry — a table_row has no children of its own, so there
+               is no third. */
+            return {
+                object: 'block',
+                type: 'table',
+                table: {
+                    table_width: rows[0].length,
+                    has_column_header: block.hasColumnHeader ?? false,
+                    /* No markdown spelling for a row header, so it is written off rather than
+                       guessed at — see the note in shared/markdown. */
+                    has_row_header: false,
+                    children: rows.map((cells) => ({
+                        object: 'block',
+                        type: 'table_row',
+                        /* A cell is a rich text array of its own, and an empty one is an empty
+                           array rather than one empty string. */
+                        table_row: { cells: cells.map((cell) => (cell ? toRichText(cell) : [])) }
+                    }))
+                }
+            }
+        }
         default:
             return { object: 'block', type: block.type, [block.type]: { rich_text } }
     }
@@ -779,6 +865,30 @@ async function deleteBlock(blockId: string): Promise<void> {
     if (!res.ok) throw new Error(`Notion block delete failed: ${res.status} ${await res.text()}`)
 }
 
+/* The block types a markdown body is made of — the ones `toNotionBlock` writes and `toDetailBlock`
+   reads back, which is the same set twice over.
+
+   What it is for is the deleting in `rewritePageBody`: a save replaces the body, and the body is
+   exactly these. Anything else on the page — a toggle, a callout, a column list, a link to another
+   page — has no markdown spelling, never reaches the editor, and so cannot have been edited by the
+   save that is being written. Deleting those as "the old body" threw away whatever the app had no
+   word for; leaving them alone costs their position instead, since the rewritten text is appended
+   and they keep the place they already had, which is to say they end up above it. */
+const BODY_BLOCK_TYPES = new Set<string>([
+    'heading_1',
+    'heading_2',
+    'heading_3',
+    'paragraph',
+    'bulleted_list_item',
+    'numbered_list_item',
+    'to_do',
+    'quote',
+    'code',
+    'divider',
+    'image',
+    'table'
+])
+
 /** Replaces a page's body with `text`, keeping the images Notion is hosting.
 
     Those images cannot be rewritten — their urls are signed and expire — and Notion has no way to
@@ -840,10 +950,13 @@ async function rewritePageBody(pageId: string, text: string): Promise<void> {
         if (run.blocks.length > 0) await appendBlocks(pageId, run.blocks, run.after)
     }
 
-    /* Child pages are the page's own contents rather than its body — a folder's pages live this way
-       — and the kept images have just been built around. Everything else was the old body. */
+    /* Only the block types the body is written from, so a page keeps what the app has no word for
+       rather than losing it to a save that could not have touched it — see `BODY_BLOCK_TYPES`. Child
+       pages are outside the set for a reason of their own: they are the page's own contents rather
+       than its body, which is how a folder's pages live. The kept images have just been built
+       around. Everything left is the old body. */
     for (const block of existing) {
-        if (block.type === 'child_page' || keptIds.has(block.id)) continue
+        if (!BODY_BLOCK_TYPES.has(block.type) || keptIds.has(block.id)) continue
         await deleteBlock(block.id)
     }
 }
@@ -1228,7 +1341,7 @@ export async function fetchProjectDetail(pageId: string): Promise<ProjectDetail>
         lastEdited: page.last_edited_time ?? null,
         instructions,
         color,
-        blocks: toDetailBlocks(contentBlocks, pages),
+        blocks: toDetailBlocks(contentBlocks, pages, await fetchTableRows(contentBlocks)),
         chats,
         people,
         folders
@@ -1241,8 +1354,11 @@ export async function fetchProjectDetail(pageId: string): Promise<ProjectDetail>
     way: their page is what is known about them. */
 async function pageBodyText(pageId: string): Promise<string> {
     const children = await fetchBlockChildren(pageId)
+    /* A table's rows are children of its own, so they are read before the blocks are flattened —
+       otherwise a page's table reaches the model as a heading with nothing under it. */
+    const tableRows = await fetchTableRows(children)
     return children
-        .map(toDetailBlock)
+        .map((block) => toDetailBlock(block, tableRows))
         .filter(
             (b): b is ProjectDetailBlock =>
                 b !== null && b.type !== 'child_page' && b.type !== 'image' && b.text.trim().length > 0
@@ -1541,10 +1657,11 @@ export async function saveConfig(config: AppConfig): Promise<void> {
 
 /** A skill's body: its page, read as markdown. Child pages are not part of it, the same rule a
     context page's body follows. */
-function readSkillBody(blocks: NotionBlock[]): string {
+async function readSkillBody(blocks: NotionBlock[]): Promise<string> {
+    const tableRows = await fetchTableRows(blocks)
     return blocksToMarkdown(
         blocks
-            .map(toDetailBlock)
+            .map((block) => toDetailBlock(block, tableRows))
             .filter((b): b is ProjectDetailBlock => b !== null && b.type !== 'child_page')
     )
 }
@@ -1578,7 +1695,7 @@ export async function fetchSkills(): Promise<Skill[]> {
             id: page.id,
             name: pageTitle(page.properties),
             mode: readSkillMode(page),
-            body: readSkillBody(await fetchBlockChildren(page.id))
+            body: await readSkillBody(await fetchBlockChildren(page.id))
         }))
     )
 }
@@ -1595,7 +1712,7 @@ export async function fetchSkill(pageId: string): Promise<Skill> {
         id: pageId,
         name: pageTitle(page.properties),
         mode: readSkillMode(page as NotionPage),
-        body: readSkillBody(blocks)
+        body: await readSkillBody(blocks)
     }
 }
 
@@ -1683,13 +1800,16 @@ export async function fetchPeople(): Promise<PersonEntry[]> {
 /** One person's page, read fresh on selection the way a project's detail is. */
 export async function fetchPerson(pageId: string): Promise<PersonDetail> {
     const [page, blocks] = await Promise.all([fetchPage(pageId), fetchBlockChildren(pageId)])
+    const tableRows = await fetchTableRows(blocks)
 
     return {
         id: pageId,
         name: pageTitle(page.properties),
         affiliation: scalarProperty(page as NotionPage, 'Affiliation') ?? '',
         lastEdited: page.last_edited_time ?? null,
-        blocks: blocks.map(toDetailBlock).filter((b): b is ProjectDetailBlock => b !== null)
+        blocks: blocks
+            .map((block) => toDetailBlock(block, tableRows))
+            .filter((b): b is ProjectDetailBlock => b !== null)
     }
 }
 

@@ -4,7 +4,7 @@ import { Icon } from '@/components/ui/icon'
 import { IconButton } from '@/components/ui/icon-button'
 import { Skeleton } from '@/components/ui/skeleton'
 import { blocksToMarkdown } from '@shared/markdown'
-import { parseAffiliations, serializeAffiliations } from '@shared/affiliations'
+import { addAffiliation, parseAffiliations, serializeAffiliations } from '@shared/affiliations'
 
 /* One person: a row in the People table and the page under it.
 
@@ -532,7 +532,7 @@ export function PersonDetailView({
                                   label={option}
                                   onClick={() => {
                                     setMenuOpen(false)
-                                    setAffiliations((current) => [...current, option])
+                                    setAffiliations((current) => addAffiliation(current, option))
                                   }}
                                 />
                               ))

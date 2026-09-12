@@ -96,12 +96,71 @@ function NotionGlyph(props: SVGProps<SVGSVGElement>): ReactElement {
   )
 }
 
+/* Lucide's mic, with the body painted in - what the composer wears while it is listening.
+
+   Not `fill` on the whole glyph, the way `folder-filled` does it: only the capsule is a closed
+   shape. The cradle is an open arc, so filling it would paint the half-disc between the arc and the
+   line closing its ends, and the mic would sit in a solid bowl. Painting the one closed shape and
+   leaving the cradle and stem in stroke is what reads as the same icon, filled. */
+function MicFilledGlyph(props: SVGProps<SVGSVGElement>): ReactElement {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      {...props}
+    >
+      <rect x="9" y="2" width="6" height="13" rx="3" fill="currentColor" stroke="none" />
+      <path d="M19 10v2a7 7 0 0 1-14 0v-2" />
+      <path d="M12 19v3" />
+    </svg>
+  )
+}
+
+/* Lucide's audio-lines, with the bars painted in - the voice mode counterpart to the mic above.
+
+   `fill` cannot do anything here at all: every bar is an open segment enclosing no area. They are
+   redrawn as capsules instead, on the same centres and carrying the half-width overhang that the
+   round caps on the stroked version already had - so the silhouette is the icon's own, just solid
+   and a little heavier than the 1.5 it is drawn beside. */
+function AudioLinesFilledGlyph(props: SVGProps<SVGSVGElement>): ReactElement {
+  const BAR = 2.2
+  /* Centre x, then the span the stroked original covers. */
+  const bars: Array<[number, number, number]> = [
+    [2, 10, 13],
+    [6, 6, 17],
+    [10, 3, 21],
+    [14, 8, 15],
+    [18, 5, 18],
+    [22, 10, 13]
+  ]
+
+  return (
+    <svg viewBox="0 0 24 24" fill="none" {...props}>
+      {bars.map(([cx, top, bottom]) => (
+        <rect
+          key={cx}
+          x={cx - BAR / 2}
+          y={top - BAR / 2}
+          width={BAR}
+          height={bottom - top + BAR}
+          rx={BAR / 2}
+          fill="currentColor"
+        />
+      ))}
+    </svg>
+  )
+}
+
 /* Lucide is the design system's icon set: 1.5px stroke, round caps/joins,
    24px grid. The DS resolves icons by kebab-case name, so keep that API. */
 const ICONS: Record<string, LucideIcon> = {
   'arrow-left': ArrowLeft,
   'arrow-right': ArrowRight,
   'audio-lines': AudioLines,
+  'audio-lines-filled': AudioLinesFilledGlyph as unknown as LucideIcon,
   blocks: Blocks,
   briefcase: Briefcase,
   'chart-no-axes-column': ChartNoAxesColumn,
@@ -127,6 +186,7 @@ const ICONS: Record<string, LucideIcon> = {
   menu: Menu,
   notion: NotionGlyph as unknown as LucideIcon,
   mic: Mic,
+  'mic-filled': MicFilledGlyph as unknown as LucideIcon,
   palette: Palette,
   'panel-left': PanelLeftGlyph as unknown as LucideIcon,
   pencil: Pencil,

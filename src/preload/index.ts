@@ -3,6 +3,7 @@ import { electronAPI } from '@electron-toolkit/preload'
 import type { AppConfig } from '../shared/config'
 import type { Skill, SkillData } from '../shared/skills'
 import type { ContextFolder } from '../shared/context'
+import type { VoiceEvent } from '../shared/voice'
 
 const api = {
   setIgnoreMouseEvents: (ignore: boolean) => ipcRenderer.send('setIgnoreMouseEvents', ignore),
@@ -62,6 +63,15 @@ const api = {
     ipcRenderer.on('claude:debug', listener)
     return () => ipcRenderer.removeListener('claude:debug', listener)
   },
+  /** Whether the listener turns what it hears into text. Wake detection runs regardless. */
+  setVoiceListening: (on: boolean) => ipcRenderer.send('voice:setListening', on),
+  /** Whether input level is reported. Only worth having on while something is showing it. */
+  setVoiceMeter: (on: boolean) => ipcRenderer.send('voice:setMeter', on),
+  onVoiceEvent: (callback: (event: VoiceEvent) => void) => {
+    const listener = (_event: Electron.IpcRendererEvent, data: VoiceEvent): void => callback(data)
+    ipcRenderer.on('voice:event', listener)
+    return () => ipcRenderer.removeListener('voice:event', listener)
+  },
   openChatWindow: () => ipcRenderer.invoke('chat:open') as Promise<void>,
   getChatLog: () =>
     ipcRenderer.invoke('notion:getChatLog') as Promise<
@@ -108,7 +118,17 @@ const api = {
       lastEdited: string | null
       instructions: string
       color: string | null
-      blocks: Array<{ id: string; type: string; text: string; checked?: boolean; url?: string }>
+      blocks: Array<{
+        id: string
+        type: string
+        text: string
+        checked?: boolean
+        url?: string
+        /** `table` only: every row, the header included when there is one. */
+        rows?: string[][]
+        /** `table` only: whether the first of `rows` is the column header. */
+        hasColumnHeader?: boolean
+      }>
       chats: Array<{ id: string; name: string; sessionId: string | null; lastEdited?: string | null }>
       people: Array<{ id: string; name: string }>
       folders: ContextFolder[]
@@ -170,7 +190,17 @@ const api = {
       name: string
       affiliation: string
       lastEdited: string | null
-      blocks: Array<{ id: string; type: string; text: string; checked?: boolean; url?: string }>
+      blocks: Array<{
+        id: string
+        type: string
+        text: string
+        checked?: boolean
+        url?: string
+        /** `table` only: every row, the header included when there is one. */
+        rows?: string[][]
+        /** `table` only: whether the first of `rows` is the column header. */
+        hasColumnHeader?: boolean
+      }>
     }>,
   createPerson: (name: string) => ipcRenderer.invoke('notion:createPerson', name) as Promise<string>,
   updatePersonContent: (pageId: string, text: string) =>

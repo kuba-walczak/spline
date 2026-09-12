@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import type { ReactElement, ReactNode } from 'react'
 import { DeviceDebug } from './DeviceDebug'
+import { parseAffiliations, serializeAffiliations } from '@shared/affiliations'
 import { Icon } from '@/components/ui/icon'
 import { IconButton } from '@/components/ui/icon-button'
 import { NavItem } from '@/components/ui/nav-item'
@@ -304,6 +305,55 @@ function RowMenu({ onDismiss, children }: { onDismiss: () => void; children: Rea
   )
 }
 
+/** The row's options control. Absolutely placed in the same 4px-inset square on every managed row,
+    so the hover fill is centered in the row rather than sitting on the line box the icon would
+    otherwise make as an inline button. */
+function RowOptionsButton({
+  label,
+  active,
+  onClick
+}: {
+  label: string
+  active: boolean
+  onClick: () => void
+}): ReactElement {
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        top: 4,
+        bottom: 4,
+        right: 4,
+        width: 'calc(var(--row-height) - 8px)',
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        lineHeight: 0
+      }}
+    >
+      {/* Square, and inset from the row's edges by the same 4px on all four sides, so its
+          highlight sits neatly inside the row's own rather than filling it edge to edge. */}
+      <IconButton
+        icon="ellipsis-vertical"
+        label={label}
+        size="sm"
+        active={active}
+        onClick={onClick}
+        style={{
+          width: '100%',
+          height: '100%',
+          minWidth: 0,
+          minHeight: 0,
+          border: 'none',
+          /* Tighter than the button default: nested inside the row's own --radius-sm corners,
+             an 8px radius on an 18px square reads almost circular. */
+          borderRadius: 'var(--radius-xs)'
+        }}
+      />
+    </div>
+  )
+}
+
 /** A sidebar row that can be deleted. Carries the same options menu a chat row does — hidden until
     the row is hovered, so a list stays quiet until you reach for one. Shared by projects, skills
     and people, which differ only in their glyph. */
@@ -369,20 +419,11 @@ function ManagedRow({
         }
       />
       {hover || menuOpen ? (
-        <div style={{ position: 'absolute', top: 4, bottom: 4, right: 4 }}>
-          <IconButton
-            icon="ellipsis-vertical"
-            label={optionsLabel}
-            size="sm"
-            active={menuOpen}
-            onClick={() => setMenuOpen((v) => !v)}
-            style={{
-              width: 'calc(var(--row-height) - 8px)',
-              height: 'calc(var(--row-height) - 8px)',
-              borderRadius: 'var(--radius-xs)'
-            }}
-          />
-        </div>
+        <RowOptionsButton
+          label={optionsLabel}
+          active={menuOpen}
+          onClick={() => setMenuOpen((v) => !v)}
+        />
       ) : null}
       {menuOpen ? (
         <RowMenu onDismiss={() => setMenuOpen(false)}>
@@ -564,31 +605,11 @@ function ChatRow({
       {/* The age and the options button occupy the same corner, so they trade places: the age is
           ambient information, and the moment there is something to click it gets out of the way. */}
       {hover || menuOpen ? (
-        <div
-          style={{
-            position: 'absolute',
-            top: 4,
-            bottom: 4,
-            right: 4
-          }}
-        >
-          {/* Square, and inset from the row's edges by the same 4px on all four sides, so its
-              highlight sits neatly inside the row's own rather than filling it edge to edge. */}
-          <IconButton
-            icon="ellipsis-vertical"
-            label="Chat options"
-            size="sm"
-            active={menuOpen}
-            onClick={() => setMenuOpen((v) => !v)}
-            style={{
-              width: 'calc(var(--row-height) - 8px)',
-              height: 'calc(var(--row-height) - 8px)',
-              /* Tighter than the button default: nested inside the row's own --radius-sm corners,
-                 an 8px radius on an 18px square reads almost circular. */
-              borderRadius: 'var(--radius-xs)'
-            }}
-          />
-        </div>
+        <RowOptionsButton
+          label="Chat options"
+          active={menuOpen}
+          onClick={() => setMenuOpen((v) => !v)}
+        />
       ) : null}
       {menuOpen ? (
         <RowMenu onDismiss={() => setMenuOpen(false)}>
@@ -920,7 +941,7 @@ export function Sidebar({
                           </span>
                         }
                         label={person.name || 'Untitled'}
-                        meta={person.affiliation}
+                        meta={serializeAffiliations(parseAffiliations(person.affiliation ?? ''))}
                         active={person.id === activePersonId}
                         optionsLabel="Person options"
                         onSelect={() => onSelectPerson(person.id)}

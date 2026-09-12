@@ -69,6 +69,13 @@ export interface ComposerProps {
   contextTokens?: number | null
   onDictate?: () => void
   onVoice?: () => void
+  /** Dictation is on: speech lands in the draft and nothing is sent until the user sends it. */
+  dictateActive?: boolean
+  /** Voice mode is on: speech lands in the draft and a pause sends it. */
+  voiceActive?: boolean
+  /** Whether the listener is there at all. Both models take a second or two to load, and a mic
+      that never opened never will — a button that looks ready either way is the worse lie. */
+  voiceAvailable?: boolean
   className?: string
   style?: CSSProperties
 }
@@ -358,6 +365,9 @@ export function Composer({
   contextTokens = null,
   onDictate,
   onVoice,
+  dictateActive = false,
+  voiceActive = false,
+  voiceAvailable = false,
   className,
   style
 }: ComposerProps): ReactElement {
@@ -860,19 +870,25 @@ export function Composer({
           ) : model ? (
             <DropdownButton variant="bare" value={model} detail={effort} onClick={onModelClick} />
           ) : null}
+          {/* Solid while it is on. The background alone was carrying the whole of the state, and an
+              outline glyph on a filled box reads as a button that merely happens to be hovered. */}
           <IconButton
-            icon="mic"
-            label="Dictate"
+            icon={dictateActive ? 'mic-filled' : 'mic'}
+            label={dictateActive ? 'Stop dictating' : 'Dictate'}
             size="md"
             glyphSize={19}
+            active={dictateActive}
+            disabled={!voiceAvailable}
             onClick={onDictate}
             style={{ color: '#E2E1DE' }}
           />
           <IconButton
-            icon="audio-lines"
-            label="Voice mode"
+            icon={voiceActive ? 'audio-lines-filled' : 'audio-lines'}
+            label={voiceActive ? 'Stop voice mode' : 'Voice mode'}
             size="md"
             glyphSize={19}
+            active={voiceActive}
+            disabled={!voiceAvailable}
             onClick={onVoice}
             style={{ color: '#E2E1DE' }}
           />

@@ -5,7 +5,15 @@
    comma a separator rather than a character, which is why the settings list refuses to accept one
    in a name — see `isValidAffiliation`. */
 
-/** Splits the column into the names it holds, trimmed, blanks and repeats dropped. */
+/* Alphabetical, case-insensitively, so a person's affiliations read the same everywhere however
+   they were added — the column keeps them in the order they were written, which is nothing the
+   reader can use. Sorted on the way out of the column rather than at each badge, so the list a
+   person is saved with is ordered too. */
+function sorted(names: string[]): string[] {
+    return [...names].sort((a, b) => a.localeCompare(b, undefined, { sensitivity: 'base' }))
+}
+
+/** Splits the column into the names it holds, trimmed, blanks and repeats dropped, in order. */
 export function parseAffiliations(raw: string): string[] {
     const seen = new Set<string>()
     const out: string[] = []
@@ -17,7 +25,12 @@ export function parseAffiliations(raw: string): string[] {
         out.push(name)
     }
 
-    return out
+    return sorted(out)
+}
+
+/** One more name on a person, back in order. */
+export function addAffiliation(names: string[], name: string): string[] {
+    return sorted([...names, name])
 }
 
 /** Back to the one string the column holds. */

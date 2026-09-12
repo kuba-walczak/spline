@@ -1,13 +1,21 @@
 import { useEffect, useRef, useState } from 'react'
 import { createPortal } from 'react-dom'
-import type { CSSProperties, MouseEvent, ReactElement } from 'react'
+/* React's MouseEvent under an alias, as ChatWindow imports it, so a bare `MouseEvent` still means
+   the DOM's — the drag below listens on `window`, which hands out that one. */
+import type { CSSProperties, MouseEvent as ReactMouseEvent, ReactElement } from 'react'
 import { Icon } from '@/components/ui/icon'
 import { IconButton } from '@/components/ui/icon-button'
 import { Skeleton, SkeletonLines } from '@/components/ui/skeleton'
 import { SectionLabel } from '@/components/ui/section-label'
 import { Switch } from '@/components/ui/switch'
-import { blocksToMarkdown } from '@shared/markdown'
+import { blocksToMarkdown, markdownToBlocks } from '@shared/markdown'
 import { listOrdinals } from '@/lib/listOrdinals'
+import {
+  clearColumnWidths,
+  loadColumnWidths,
+  MIN_COLUMN_WIDTH,
+  saveColumnWidths
+} from '@/lib/columnWidths'
 import { folderByItemId, folderMemberIds } from '@shared/context'
 import { parseAffiliations, serializeAffiliations } from '@shared/affiliations'
 import { normalizeNotionId, sameNotionId } from '@shared/notionId'
@@ -34,6 +42,10 @@ interface DetailBlock {
   text: string
   checked?: boolean
   url?: string
+  /** `table` only: every row, the header included when there is one. */
+  rows?: string[][]
+  /** `table` only: whether the first of `rows` is the column header. */
+  hasColumnHeader?: boolean
 }
 
 interface ProjectChatEntry {
@@ -706,7 +718,7 @@ function MenuItem({
   /** Rows that open a list do it on hover; the click is kept so the row still works from a keyboard
       or a tap, where there is no hover to speak of. */
   onHover?: () => void
-  onClick: (event: MouseEvent<HTMLButtonElement>) => void
+  onClick: (event: ReactMouseEvent<HTMLButtonElement>) => void
 }): ReactElement {
   /* A marked row holds its own background whether or not the pointer is on it — that is the whole
      of what marking looks like, and it has to survive the pointer moving down the list. */
@@ -1069,6 +1081,222 @@ const BLOCK_TAG: Record<string, string | undefined> = {
   to_do: 'li'
 }
 
+const tableCellStyle: CSSProperties = {
+  padding: '7px 12px',
+  border: '1px solid var(--border-default)',
+  font: 'var(--type-body)',
+  letterSpacing: 'var(--tracking-tight)',
+  textAlign: 'left',
+  verticalAlign: 'top',
+  /* A cell is as wide as it needs to be and wraps only when the table has run out of room, which is
+     what keeps a column of short values from being squared off into a block of text. */
+  whiteSpace: 'pre-wrap'
+}
+
+/** The grip on a column's right edge. Sits over the border rather than beside it, so what you take
+    hold of is the line you are moving; the 9px of hit area is wider than the line it draws, which is
+    the difference between a handle you can grab and one you have to aim at. */
+function ColumnGrip({
+  onStart,
+  onReset
+}: {
+  onStart: (event: ReactMouseEvent) => void
+  onReset: () => void
+}): ReactElement {
+  const [hovered, setHovered] = useState(false)
+
+  return (
+    <span
+      onMouseDown={onStart}
+      onDoubleClick={onReset}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
+      title="Drag to resize, double-click to size every column to its contents"
+      style={{
+        position: 'absolute',
+        top: 0,
+        bottom: 0,
+        right: -5,
+        width: 9,
+        zIndex: 1,
+        cursor: 'col-resize',
+        /* The line is drawn by a child rather than by the grip's own background, so the part you can
+           grab stays wider than the part you can see. */
+        display: 'flex',
+        justifyContent: 'center'
+      }}
+    >
+      <span
+        style={{
+          width: 2,
+          background: hovered ? 'var(--text-faint)' : 'transparent',
+          transition: 'var(--transition-control)'
+        }}
+      />
+    </span>
+  )
+}
+
+/** A table as the page holds it: read-only, like every other block in this view, except for the
+    width of its columns.
+
+    Those are draggable and kept per machine — see lib/columnWidths, which says why they cannot go to
+    Notion. Until one is dragged the table sizes itself to its contents, which is what a table of
+    short values wants; the first drag freezes the widths as they currently are and goes on from
+    there, so nothing jumps when you take hold of a border.
+
+    Scrolls inside its own box rather than widening the panel — the panel clips its overflow to keep
+    its rounded corners, so a table wider than the page would otherwise simply be cut off. */
+function ContextTable({
+  pageId,
+  tableIndex,
+  rows,
+  hasColumnHeader
+}: {
+  pageId: string
+  tableIndex: number
+  rows: string[][]
+  hasColumnHeader: boolean
+}): ReactElement {
+  const header = hasColumnHeader ? rows[0] : null
+  const body = hasColumnHeader ? rows.slice(1) : rows
+  const columns = rows[0]?.length ?? 0
+
+  const [widths, setWidths] = useState<number[] | null>(() =>
+    loadColumnWidths(pageId, tableIndex, columns)
+  )
+  const tableRef = useRef<HTMLTableElement | null>(null)
+  /* What the drag has reached, for the mouseup to store. State cannot be read from inside the
+     listener that is setting it, and a width is worth saving once at the end rather than on each of
+     the sixty frames a drag is made of. */
+  const dragged = useRef<number[] | null>(null)
+
+  /* A table swapped in under the same element — the sidebar moves between pages without unmounting
+     this view — would otherwise keep the widths of the one before it. */
+  useEffect(() => {
+    setWidths(loadColumnWidths(pageId, tableIndex, columns))
+  }, [pageId, tableIndex, columns])
+
+  /** What the browser has currently made each column, so a drag starts from what is on screen. */
+  function measure(): number[] {
+    const row = tableRef.current?.querySelector('tr')
+    if (!row) return []
+    return Array.from(row.children, (cell) => cell.getBoundingClientRect().width)
+  }
+
+  function startResize(column: number, event: ReactMouseEvent): void {
+    /* Without this the drag selects the text of the cells it passes over. */
+    event.preventDefault()
+    const start = widths ?? measure()
+    if (start.length !== columns) return
+
+    const startX = event.clientX
+    const startWidth = start[column]
+
+    function onMove(move: MouseEvent): void {
+      const next = start.slice()
+      next[column] = Math.max(MIN_COLUMN_WIDTH, Math.round(startWidth + (move.clientX - startX)))
+      dragged.current = next
+      setWidths(next)
+    }
+
+    function onUp(): void {
+      window.removeEventListener('mousemove', onMove)
+      window.removeEventListener('mouseup', onUp)
+      if (dragged.current) saveColumnWidths(pageId, tableIndex, dragged.current)
+      dragged.current = null
+    }
+
+    window.addEventListener('mousemove', onMove)
+    window.addEventListener('mouseup', onUp)
+  }
+
+  function reset(): void {
+    clearColumnWidths(pageId, tableIndex)
+    setWidths(null)
+  }
+
+  /* Fixed only once there are widths to honour: `auto` is what sizes a column to its contents, and
+     it is the better default for a table of short values. */
+  const sized = widths !== null
+  const cellStyle: CSSProperties = sized
+    ? /* A fixed column no longer widens for what is in it, so a long unbroken url has to be allowed
+         to break or it would spill across the cells beside it. */
+      { ...tableCellStyle, overflow: 'hidden', overflowWrap: 'anywhere' }
+    : tableCellStyle
+
+  const grip = (column: number): ReactElement => (
+    <ColumnGrip onStart={(event) => startResize(column, event)} onReset={reset} />
+  )
+
+  return (
+    /* `menuscroll` rather than `chatscroll`: a stable gutter on both edges would inset the table
+       10px from the page text it sits among. The bar is only for a table that is wider than the
+       page; the page itself is what scrolls vertically. */
+    <div className="menuscroll" style={{ maxWidth: '100%', overflowX: 'auto', overflowY: 'hidden' }}>
+      <table
+        ref={tableRef}
+        style={{
+          borderCollapse: 'collapse',
+          color: 'var(--text-muted)',
+          tableLayout: sized ? 'fixed' : 'auto',
+          width: sized ? widths.reduce((total, width) => total + width, 0) : undefined
+        }}
+      >
+        {sized ? (
+          <colgroup>
+            {widths.map((width, column) => (
+              <col key={column} style={{ width }} />
+            ))}
+          </colgroup>
+        ) : null}
+        {header ? (
+          <thead>
+            <tr>
+              {header.map((cell, column) => (
+                <th
+                  key={column}
+                  style={{
+                    ...cellStyle,
+                    position: 'relative',
+                    background: 'var(--surface-inset)',
+                    color: 'var(--text-body)',
+                    fontWeight: 'var(--weight-semibold)'
+                  }}
+                >
+                  {cell}
+                  {grip(column)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+        ) : null}
+        <tbody>
+          {body.map((row, index) => (
+            /* Keyed by position: a row carries no id of its own — Notion's is on the block, which
+               this never sees — and the list is rebuilt whole on every read anyway. */
+            <tr key={index}>
+              {row.map((cell, column) => (
+                <td
+                  key={column}
+                  /* A table with no column header has no row to hang the grips off but this one, so
+                     the first body row carries them instead. */
+                  style={
+                    !header && index === 0 ? { ...cellStyle, position: 'relative' } : cellStyle
+                  }
+                >
+                  {cell}
+                  {!header && index === 0 ? grip(column) : null}
+                </td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  )
+}
+
 /** Flattens a page's text blocks down to plain lines — the shape an edit textarea round-trips through. */
 
 /** Shared by the name field and the colour swatch, so the two halves sit level. */
@@ -1129,9 +1357,11 @@ export function ContextPageView({
   onSave: (title: string, text: string) => Promise<void>
 }): ReactElement {
   const blocks = detail?.blocks.filter((b) => b.type !== 'child_page') ?? []
-  const ordinals = listOrdinals(blocks)
   const title = detail?.title || 'Untitled'
 
+  /* Reading or writing the body. The name beside it is always a field, the way a person's or a
+     skill's is; the body is the one thing this view holds back, because a page is written in
+     markdown and a textarea full of it is not what you want to be looking at while you read. */
   const [editing, setEditing] = useState(false)
   const [titleDraft, setTitleDraft] = useState('')
   const [draft, setDraft] = useState('')
@@ -1145,13 +1375,31 @@ export function ContextPageView({
   /* The title is edited alongside the body and written by the same Sync, the way a person's name is
      — one edit mode over the whole page rather than a separate gesture for the heading. */
   const originalTitle = detail?.title ?? ''
-  const dirty = draft !== original || titleDraft !== originalTitle
 
-  function startEditing(): void {
-    setTitleDraft(originalTitle)
-    setDraft(original)
-    setEditing(true)
-  }
+  /* The drafts follow whatever Notion last handed us: the page opened, and the re-read after a save.
+     The body goes back to being read at the same moment, since there is nothing left to write. */
+  useEffect(() => {
+    setTitleDraft(detail?.title ?? '')
+    setDraft(
+      detail ? blocksToMarkdown(detail.blocks.filter((b) => b.type !== 'child_page')) : ''
+    )
+    setEditing(false)
+  }, [detail])
+
+  const ready = detail !== null && !loading && !error
+  const dirty = ready && (draft !== original || titleDraft !== originalTitle)
+
+  /* What the page reads as, parsed back out of the draft rather than off the blocks Notion gave us —
+     so closing the textarea on an unsynced edit shows that edit, and what is on screen is what a
+     Sync would lay down. The ids are positional: markdown carries none, and nothing outside this
+     render needs them. */
+  const shown = markdownToBlocks(draft).map((b, index) => ({ ...b, id: `draft-${index}` }))
+  const ordinals = listOrdinals(shown)
+  /* Where each table sits among the page's tables, which is what its stored column widths are filed
+     under — see lib/columnWidths for why the block's own id will not do. */
+  const tableOrdinals = new Map<string, number>(
+    shown.filter((b) => b.type === 'table').map((b, index) => [b.id, index])
+  )
 
   async function sync(): Promise<void> {
     if (saving) return
@@ -1164,6 +1412,12 @@ export function ContextPageView({
     } finally {
       setSaving(false)
     }
+  }
+
+  /** Throws the unsynced edits away, back to what Notion last gave us. */
+  function discard(): void {
+    setTitleDraft(originalTitle)
+    setDraft(original)
   }
 
   return (
@@ -1221,7 +1475,7 @@ export function ContextPageView({
         {loading ? (
           <Skeleton height={11} width={96} radius={3} />
         ) : (
-          <span style={{ color: 'var(--text-primary)' }}>{editing ? titleDraft || 'Untitled' : title}</span>
+          <span style={{ color: 'var(--text-primary)' }}>{titleDraft || 'Untitled'}</span>
         )}
       </nav>
 
@@ -1229,143 +1483,205 @@ export function ContextPageView({
         className="chatscroll"
         style={{ flex: '1 1 auto', minHeight: 0, overflowY: 'auto', overflowX: 'hidden' }}
       >
-      <div
-        style={{
-          width: '100%',
-          maxWidth: 1114,
-          margin: '0 auto',
-          padding: '38px 28px 64px',
-          boxSizing: 'border-box'
-        }}
-      >
-        <header
+        <div
           style={{
-            display: 'flex',
-            alignItems: 'flex-start',
-            justifyContent: 'space-between',
-            gap: 'var(--space-10)',
-            marginBottom: 'var(--space-10)'
+            width: '100%',
+            /* The same content width the people and skill views use, so the sections line up when
+               you move between them. */
+            maxWidth: 1114,
+            margin: '0 auto',
+            padding: '38px 28px 64px',
+            boxSizing: 'border-box'
           }}
         >
-          {editing ? (
-            <input
-              value={titleDraft}
-              onChange={(e) => setTitleDraft(e.target.value)}
-              placeholder="Untitled"
-              style={{
-                flex: '1 1 auto',
-                minWidth: 0,
-                boxSizing: 'border-box',
-                padding: '2px 0',
-                background: 'transparent',
-                border: 'none',
-                borderBottom: '1px solid var(--border-default)',
-                color: 'var(--text-primary)',
-                font: 'var(--type-title)',
-                letterSpacing: 'var(--tracking-display)',
-                outline: 'none',
-                boxShadow: 'none'
-              }}
-            />
-          ) : (
+          {/* Title centred in the column, with the actions pinned to the right rather than sharing a
+              flex row — a space-between row would shift the title sideways as buttons appear. */}
+          <div
+            style={{
+              position: 'relative',
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'center',
+              minHeight: 44,
+              margin: '0 0 var(--space-10)'
+            }}
+          >
             <h1
               style={{
                 margin: 0,
-                flex: '1 1 auto',
-                minWidth: 0,
-                font: 'var(--type-title)',
+                font: 'var(--type-display)',
                 color: 'var(--text-primary)',
-                letterSpacing: 'var(--tracking-display)'
+                letterSpacing: 'var(--tracking-display)',
+                textAlign: 'center'
               }}
             >
               {/* The title arrives with the page, so it waits with it rather than sitting finished
                   above a body that is still loading. */}
               {loading ? <Skeleton height={38} width="42%" /> : title}
             </h1>
-          )}
-          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-1)', flex: '0 0 auto', paddingTop: 4 }}>
-            {editing && dirty ? (
-              <IconButton icon="refresh-cw" label="Sync to Notion" size="sm" onClick={() => void sync()} disabled={saving} />
-            ) : null}
-            <IconButton
-              icon="pencil"
-              label={editing ? 'Cancel edit' : 'Edit page'}
-              size="sm"
-              active={editing}
-              disabled={loading || error}
-              onClick={() => (editing ? setEditing(false) : startEditing())}
-            />
-          </div>
-        </header>
-
-        {editing ? (
-          <textarea
-            className="chatscroll"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            style={editTextareaStyle}
-            autoFocus
-          />
-        ) : (
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
-          {loading ? (
-            <>
-              <SkeletonLines lines={4} />
-              <Skeleton height={18} width="40%" delay={0.3} />
-              <SkeletonLines lines={3} delay={0.36} />
-            </>
-          ) : error ? (
-            <span style={panelBodyStyle}>Couldn&apos;t load this page.</span>
-          ) : blocks.length === 0 ? (
-            <span style={panelBodyStyle}>This page is empty.</span>
-          ) : (
-            blocks.map((b) => {
-              if (b.type === 'image' && b.url) {
-                return (
-                  <img
-                    key={b.id}
-                    src={b.url}
-                    alt={b.text || ''}
-                    style={{ maxWidth: '100%', borderRadius: 'var(--radius-md)', display: 'block' }}
+            <div
+              style={{
+                position: 'absolute',
+                right: 0,
+                top: '50%',
+                transform: 'translateY(-50%)',
+                display: 'flex',
+                alignItems: 'center',
+                gap: 'var(--space-2)'
+              }}
+            >
+              {dirty ? (
+                <>
+                  <IconButton
+                    icon="refresh-cw"
+                    label="Sync to Notion"
+                    size="sm"
+                    onClick={() => void sync()}
+                    disabled={saving}
                   />
-                )
-              }
-              const tag = BLOCK_TAG[b.type]
-              if (tag === 'h3' || tag === 'h4') {
-                return (
-                  <h3 key={b.id} style={{ ...headingStyle, margin: 0 }}>
-                    {b.text}
-                  </h3>
-                )
-              }
-              if (tag === 'li') {
-                /* Every list kind carries its own marker: a number counted off the run it is in, a
-                   box for a to-do, a dot for the rest. Without one the three read as indented
-                   paragraphs and a numbered list loses the only thing that made it one. */
-                const marker =
-                  b.type === 'to_do'
-                    ? b.checked
-                      ? '☑'
-                      : '☐'
-                    : b.type === 'numbered_list_item'
-                      ? `${ordinals.get(b.id) ?? 1}.`
-                      : '•'
-                return (
-                  <p key={b.id} style={{ ...panelBodyStyle, margin: 0, paddingLeft: 'var(--space-6)' }}>
-                    {marker} {b.text}
-                  </p>
-                )
-              }
-              return (
-                <p key={b.id} style={{ ...panelBodyStyle, margin: 0 }}>
-                  {b.text}
-                </p>
-              )
-            })
-          )}
+                  <IconButton
+                    icon="x"
+                    label="Discard changes"
+                    size="sm"
+                    onClick={discard}
+                    disabled={saving}
+                  />
+                </>
+              ) : null}
+            </div>
+          </div>
+
+          {/* One panelled card, hairline-divided, as a person or a skill has: the name the row
+              carries, then the page itself under it. */}
+          <aside
+            style={{
+              boxSizing: 'border-box',
+              border: '1px solid var(--border-default)',
+              borderRadius: 'var(--radius-lg)',
+              background: 'transparent',
+              overflow: 'hidden'
+            }}
+          >
+            <div style={panelStyle()}>
+              <h3 style={{ ...headingStyle, marginBottom: 'var(--space-3)' }}>Name</h3>
+              {loading ? (
+                <Skeleton height={FIELD_HEIGHT} radius="var(--radius-md)" />
+              ) : (
+                <input
+                  value={titleDraft}
+                  onChange={(e) => setTitleDraft(e.target.value)}
+                  placeholder="Untitled"
+                  disabled={error}
+                  style={{ ...editFieldStyle, height: FIELD_HEIGHT }}
+                />
+              )}
+            </div>
+
+            <div style={panelStyle(true)}>
+              {/* The one place this view parts from the others: the description is read as the page
+                  rather than sat in a textarea, and the pencil opens the markdown behind it. */}
+              <div
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: 'var(--space-4)',
+                  marginBottom: 'var(--space-3)'
+                }}
+              >
+                <h3 style={headingStyle}>Description</h3>
+                <IconButton
+                  icon="pencil"
+                  label={editing ? 'Done editing' : 'Edit description'}
+                  size="sm"
+                  active={editing}
+                  disabled={loading || error}
+                  onClick={() => setEditing((v) => !v)}
+                />
+              </div>
+
+              {loading ? (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
+                  <SkeletonLines lines={4} />
+                  <Skeleton height={18} width="40%" delay={0.3} />
+                  <SkeletonLines lines={3} delay={0.36} />
+                </div>
+              ) : editing ? (
+                <textarea
+                  className="chatscroll"
+                  value={draft}
+                  onChange={(e) => setDraft(e.target.value)}
+                  style={editTextareaStyle}
+                  autoFocus
+                />
+              ) : (
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-5)' }}>
+                  {error ? (
+                    <span style={panelBodyStyle}>Couldn&apos;t load this page.</span>
+                  ) : shown.length === 0 ? (
+                    <span style={panelBodyStyle}>This page is empty.</span>
+                  ) : (
+                    shown.map((b) => {
+                      if (b.type === 'image' && b.url) {
+                        return (
+                          <img
+                            key={b.id}
+                            src={b.url}
+                            alt={b.text || ''}
+                            style={{ maxWidth: '100%', borderRadius: 'var(--radius-md)', display: 'block' }}
+                          />
+                        )
+                      }
+                      if (b.type === 'table' && b.rows && b.rows.length > 0) {
+                        return (
+                          <ContextTable
+                            key={b.id}
+                            pageId={detail?.id ?? ''}
+                            tableIndex={tableOrdinals.get(b.id) ?? 0}
+                            rows={b.rows}
+                            hasColumnHeader={b.hasColumnHeader ?? false}
+                          />
+                        )
+                      }
+                      const tag = BLOCK_TAG[b.type]
+                      if (tag === 'h3' || tag === 'h4') {
+                        return (
+                          <h3 key={b.id} style={{ ...headingStyle, margin: 0 }}>
+                            {b.text}
+                          </h3>
+                        )
+                      }
+                      if (tag === 'li') {
+                        /* Every list kind carries its own marker: a number counted off the run it is
+                           in, a box for a to-do, a dot for the rest. Without one the three read as
+                           indented paragraphs and a numbered list loses the only thing that made it
+                           one. */
+                        const marker =
+                          b.type === 'to_do'
+                            ? b.checked
+                              ? '☑'
+                              : '☐'
+                            : b.type === 'numbered_list_item'
+                              ? `${ordinals.get(b.id) ?? 1}.`
+                              : '•'
+                        return (
+                          <p key={b.id} style={{ ...panelBodyStyle, margin: 0, paddingLeft: 'var(--space-6)' }}>
+                            {marker} {b.text}
+                          </p>
+                        )
+                      }
+                      return (
+                        <p key={b.id} style={{ ...panelBodyStyle, margin: 0 }}>
+                          {b.text}
+                        </p>
+                      )
+                    })
+                  )}
+                </div>
+              )}
+            </div>
+          </aside>
         </div>
-        )}
-      </div>
       </div>
     </main>
   )

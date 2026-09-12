@@ -1,5 +1,6 @@
 import { ElectronAPI } from '@electron-toolkit/preload'
 import type { AppConfig } from '../shared/config'
+import type { VoiceEvent } from '../shared/voice'
 import type { Skill, SkillData } from '../shared/skills'
 import type { ContextFolder } from '../shared/context'
 
@@ -52,6 +53,9 @@ declare global {
         callback: (payload: { sessionId: string; event: Record<string, unknown> }) => void
       ) => () => void
       onClaudeDebug: (callback: (payload: { sessionId: string; line: string }) => void) => () => void
+      setVoiceListening: (on: boolean) => void
+      setVoiceMeter: (on: boolean) => void
+      onVoiceEvent: (callback: (event: VoiceEvent) => void) => () => void
       openChatWindow: () => Promise<void>
       getChatLog: () => Promise<
         Array<{
@@ -89,7 +93,17 @@ declare global {
       name: string
       affiliation: string
       lastEdited: string | null
-      blocks: Array<{ id: string; type: string; text: string; checked?: boolean; url?: string }>
+      blocks: Array<{
+        id: string
+        type: string
+        text: string
+        checked?: boolean
+        url?: string
+        /** `table` only: every row, the header included when there is one. */
+        rows?: string[][]
+        /** `table` only: whether the first of `rows` is the column header. */
+        hasColumnHeader?: boolean
+      }>
     }>
       createPerson: (name: string) => Promise<string>
       updatePersonContent: (pageId: string, text: string) => Promise<void>
@@ -105,7 +119,17 @@ declare global {
         lastEdited: string | null
         instructions: string
         color: string | null
-        blocks: Array<{ id: string; type: string; text: string; checked?: boolean; url?: string }>
+        blocks: Array<{
+          id: string
+          type: string
+          text: string
+          checked?: boolean
+          url?: string
+          /** `table` only: every row, the header included when there is one. */
+          rows?: string[][]
+          /** `table` only: whether the first of `rows` is the column header. */
+          hasColumnHeader?: boolean
+        }>
         chats: Array<{ id: string; name: string; sessionId: string | null; lastEdited?: string | null }>
         people: Array<{ id: string; name: string }>
         folders: ContextFolder[]

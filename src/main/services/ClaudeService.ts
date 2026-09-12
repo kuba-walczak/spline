@@ -235,6 +235,12 @@ function ensureSession(sessionId: string, model: string, effort: string, systemP
         '-p',
         '--input-format', 'stream-json',
         '--output-format', 'stream-json',
+        /* Text arrives as it is generated rather than only in the final `result`. It costs nothing
+           at the API — the CLI already receives a stream — and it is what lets the reply type into
+           the bubble and be read aloud from the first finished sentence. Fixed at spawn like
+           `--model`, so it is unconditional: making it follow voice mode would mean replacing the
+           process on every toggle. */
+        '--include-partial-messages',
         '--tools', BUILTIN_TOOLS,
         '--allowedTools', ALLOWED_TOOLS,
         '--verbose',

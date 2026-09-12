@@ -4,10 +4,18 @@ import { Icon } from '@/components/ui/icon'
 import { Switch } from '@/components/ui/switch'
 import { IconButton } from '@/components/ui/icon-button'
 import { formatPollSeconds } from '@/lib/pollInterval'
+import { levelFraction, useVoiceLevel } from '@/lib/voiceMeter'
+import { speakNow, speechVoices } from '@/lib/speech'
 import {
   EMPTY_CONFIG,
   MAX_POLL_SECONDS,
   MIN_POLL_SECONDS,
+  MAX_VOICE_SILENCE_DB,
+  MIN_VOICE_SILENCE_DB,
+  MAX_VOICE_SILENCE_MS,
+  MIN_VOICE_SILENCE_MS,
+  MAX_SPEECH_RATE,
+  MIN_SPEECH_RATE,
   type AppConfig
 } from '@shared/config'
 import { isValidAffiliation, parseAffiliations, serializeAffiliations } from '@shared/affiliations'
@@ -29,12 +37,88 @@ export interface SettingsModalProps {
   onSaved: (systemChanged: boolean) => void
 }
 
-type SettingsTab = 'chats' | 'people'
+type SettingsTab = 'chats' | 'voice' | 'people'
 
 const TABS: Array<{ id: SettingsTab; label: string; icon: string }> = [
   { id: 'chats', label: 'Chats', icon: 'message-circle' },
+  { id: 'voice', label: 'Voice', icon: 'audio-lines' },
   { id: 'people', label: 'People', icon: 'users' }
 ]
+
+/** The silence duration, as the readout beside its slider. */
+function formatSilenceMs(ms: number): string {
+  return `${(ms / 1000).toFixed(1)} s`
+}
+
+/* The scale the meter and the threshold marker are both drawn on. Wider than the window used for the
+   composer button, because calibrating means seeing where a quiet room actually sits — which is
+   nearer the bottom of this than the readable part of a level indicator needs to be. */
+const METER_FLOOR = -80
+const METER_CEILING = 0
+
+/** What the room sounds like right now, against where the threshold has been put. The setting is a
+    number with no meaning until it can be compared to something, and this is that something: speech
+    should push the bar past the marker, and a quiet room should leave it short.
+
+    A leaf, and deliberately so — levels arrive ten times a second, and the modal around it holds
+    every setting in the app. It is also the only thing that asks for metering, so the listener stops
+    reporting the moment this tab is left. */
+function LevelMeter({ thresholdDb }: { thresholdDb: number }): ReactElement {
+  const db = useVoiceLevel(true)
+  const fraction = levelFraction(db, METER_FLOOR, METER_CEILING)
+  const marker = levelFraction(thresholdDb, METER_FLOOR, METER_CEILING)
+  const speaking = db > thresholdDb
+
+  return (
+    <div style={{ maxWidth: '710px', marginBottom: '28px' }}>
+      <div
+        style={{
+          position: 'relative',
+          height: '10px',
+          borderRadius: 'var(--radius-sm)',
+          background: 'var(--surface-control)',
+          overflow: 'hidden'
+        }}
+      >
+        <div
+          style={{
+            width: `${fraction * 100}%`,
+            height: '100%',
+            /* The bar says which side of the threshold the room is on, so that the answer does not
+               depend on reading the marker's position against it. */
+            background: speaking ? '#7FA87F' : '#4D4D4C',
+            transition: 'width var(--duration-fast) var(--ease-standard), background var(--duration-fast) var(--ease-standard)'
+          }}
+        />
+        <div
+          style={{
+            position: 'absolute',
+            top: 0,
+            bottom: 0,
+            left: `${marker * 100}%`,
+            width: '2px',
+            background: '#E6E5E2'
+          }}
+        />
+      </div>
+      <div
+        style={{
+          display: 'flex',
+          justifyContent: 'space-between',
+          marginTop: '8px',
+          font: 'var(--type-meta)',
+          letterSpacing: 'var(--tracking-tight)',
+          color: 'var(--text-faint)'
+        }}
+      >
+        <span>{speaking ? 'Hearing speech' : 'Quiet'}</span>
+        <span style={{ font: 'var(--weight-medium) var(--text-xs)/1 var(--font-mono)' }}>
+          {db <= METER_FLOOR ? '—' : `${db.toFixed(0)} dB`}
+        </span>
+      </div>
+    </div>
+  )
+}
 
 /** One affiliation in the list. The same shell a composer attachment chip and a person's affiliation
     wear, so the thing being edited here looks like the thing it becomes. */
@@ -187,6 +271,29 @@ export function SettingsModal({
     draft.affiliations.some((name, i) => name !== config.affiliations[i])
   const expandToolsDirty = draft.expandTools !== config.expandTools
   const pollDirty = draft.pollSeconds !== config.pollSeconds
+  /* One flag for the pair: they are two halves of the same rule about when a spoken message ends. */
+  const voiceDirty =
+    draft.voiceSilenceDb !== config.voiceSilenceDb || draft.voiceSilenceMs !== config.voiceSilenceMs
+  /* Its own flag rather than folded into `voiceDirty`, matching the rule that each section shows
+     its own sync button — and a field with no flag at all is a setting that can never be stored. */
+  const speechDirty =
+    draft.speechVoice !== config.speechVoice || draft.speechRate !== config.speechRate
+
+  /* The machine's installed voices. Empty until the engine has enumerated them, which is why this
+     is state and not a call at render time. */
+  const [voices, setVoices] = useState<SpeechSynthesisVoice[]>([])
+  useEffect(() => {
+    let live = true
+    void speechVoices().then((list) => {
+      if (live) setVoices(list)
+    })
+    return () => {
+      live = false
+    }
+  }, [])
+  /* A voice chosen on another machine still has to show, or the select renders blank and the first
+     change silently overwrites that machine's choice. */
+  const voiceMissing = draft.speechVoice !== '' && !voices.some((v) => v.name === draft.speechVoice)
 
   /* Refused rather than silently deduped, so the reason a name did not appear is visible: a comma
      would be read back as two affiliations, and a repeat would give the People menu two identical
@@ -632,6 +739,377 @@ export function SettingsModal({
                   <span>30 seconds</span>
                   <span>1 hour</span>
                 </div>
+              </>
+            ) : tab === 'voice' ? (
+              <>
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '16px',
+                    margin: '0 0 8px',
+                    maxWidth: '710px'
+                  }}
+                >
+                  <h2
+                    style={{
+                      margin: 0,
+                      font: 'var(--weight-semibold) var(--text-lg)/1.3 var(--font-sans)',
+                      letterSpacing: 'var(--tracking-tight)',
+                      color: 'var(--text-primary)'
+                    }}
+                  >
+                    End of a spoken message
+                  </h2>
+                  {voiceDirty ? (
+                    <IconButton
+                      icon="refresh-cw"
+                      label="Sync to Notion"
+                      size="sm"
+                      onClick={() => void sync()}
+                      disabled={saving}
+                    />
+                  ) : null}
+                </div>
+                <p
+                  style={{
+                    margin: '0 0 24px',
+                    maxWidth: '710px',
+                    font: 'var(--weight-regular) var(--text-base)/1.45 var(--font-sans)',
+                    letterSpacing: 'var(--tracking-tight)',
+                    color: 'var(--text-muted)'
+                  }}
+                >
+                  In voice mode, what is in the composer is sent once the microphone has been quieter
+                  than the threshold for this long. Dictation uses neither — it only ever writes into
+                  the composer, and waits to be sent.
+                </p>
+
+                <LevelMeter thresholdDb={draft.voiceSilenceDb} />
+
+                <h3
+                  style={{
+                    margin: '0 0 4px',
+                    font: 'var(--weight-medium) var(--text-base)/1.3 var(--font-sans)',
+                    letterSpacing: 'var(--tracking-tight)',
+                    color: 'var(--text-primary)'
+                  }}
+                >
+                  Threshold
+                </h3>
+                <p
+                  style={{
+                    margin: '0 0 16px',
+                    maxWidth: '710px',
+                    font: 'var(--weight-regular) var(--text-sm)/1.45 var(--font-sans)',
+                    letterSpacing: 'var(--tracking-tight)',
+                    color: 'var(--text-muted)'
+                  }}
+                >
+                  Set this just above where the meter sits in a quiet room. Speech usually runs
+                  between −35 and −15 dB.
+                </p>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '18px', maxWidth: '710px' }}>
+                  <input
+                    type="range"
+                    min={MIN_VOICE_SILENCE_DB}
+                    max={MAX_VOICE_SILENCE_DB}
+                    step={1}
+                    value={draft.voiceSilenceDb}
+                    onChange={(e) =>
+                      setDraft((d) => ({ ...d, voiceSilenceDb: Number(e.target.value) }))
+                    }
+                    disabled={loading || failed}
+                    aria-label="Silence threshold in decibels"
+                    style={{ flex: '1 1 auto', accentColor: '#E6E5E2', cursor: 'pointer' }}
+                  />
+                  <span
+                    style={{
+                      flex: '0 0 auto',
+                      minWidth: '92px',
+                      textAlign: 'right',
+                      font: 'var(--weight-medium) var(--text-base)/1 var(--font-mono)',
+                      letterSpacing: 'var(--tracking-tight)',
+                      color: 'var(--text-body)'
+                    }}
+                  >
+                    {draft.voiceSilenceDb} dB
+                  </span>
+                </div>
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    maxWidth: '710px',
+                    marginTop: '8px',
+                    paddingRight: '110px',
+                    font: 'var(--type-meta)',
+                    letterSpacing: 'var(--tracking-tight)',
+                    color: 'var(--text-faint)'
+                  }}
+                >
+                  <span>Hears almost anything</span>
+                  <span>Hears only a raised voice</span>
+                </div>
+
+                <h3
+                  style={{
+                    margin: '32px 0 4px',
+                    font: 'var(--weight-medium) var(--text-base)/1.3 var(--font-sans)',
+                    letterSpacing: 'var(--tracking-tight)',
+                    color: 'var(--text-primary)'
+                  }}
+                >
+                  Pause before sending
+                </h3>
+                <p
+                  style={{
+                    margin: '0 0 16px',
+                    maxWidth: '710px',
+                    font: 'var(--weight-regular) var(--text-sm)/1.45 var(--font-sans)',
+                    letterSpacing: 'var(--tracking-tight)',
+                    color: 'var(--text-muted)'
+                  }}
+                >
+                  Long enough to think mid-sentence without the message going early; short enough
+                  that finishing one does not mean waiting on it.
+                </p>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '18px', maxWidth: '710px' }}>
+                  <input
+                    type="range"
+                    min={MIN_VOICE_SILENCE_MS}
+                    max={MAX_VOICE_SILENCE_MS}
+                    step={100}
+                    value={draft.voiceSilenceMs}
+                    onChange={(e) =>
+                      setDraft((d) => ({ ...d, voiceSilenceMs: Number(e.target.value) }))
+                    }
+                    disabled={loading || failed}
+                    aria-label="Pause before sending, in milliseconds"
+                    style={{ flex: '1 1 auto', accentColor: '#E6E5E2', cursor: 'pointer' }}
+                  />
+                  <span
+                    style={{
+                      flex: '0 0 auto',
+                      minWidth: '92px',
+                      textAlign: 'right',
+                      font: 'var(--weight-medium) var(--text-base)/1 var(--font-mono)',
+                      letterSpacing: 'var(--tracking-tight)',
+                      color: 'var(--text-body)'
+                    }}
+                  >
+                    {formatSilenceMs(draft.voiceSilenceMs)}
+                  </span>
+                </div>
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    maxWidth: '710px',
+                    marginTop: '8px',
+                    paddingRight: '110px',
+                    font: 'var(--type-meta)',
+                    letterSpacing: 'var(--tracking-tight)',
+                    color: 'var(--text-faint)'
+                  }}
+                >
+                  <span>{formatSilenceMs(MIN_VOICE_SILENCE_MS)}</span>
+                  <span>{formatSilenceMs(MAX_VOICE_SILENCE_MS)}</span>
+                </div>
+
+                <div
+                  style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    justifyContent: 'space-between',
+                    gap: '16px',
+                    margin: '40px 0 8px',
+                    maxWidth: '710px'
+                  }}
+                >
+                  <h2
+                    style={{
+                      margin: 0,
+                      font: 'var(--weight-semibold) var(--text-lg)/1.3 var(--font-sans)',
+                      letterSpacing: 'var(--tracking-tight)',
+                      color: 'var(--text-primary)'
+                    }}
+                  >
+                    Spoken replies
+                  </h2>
+                  {speechDirty ? (
+                    <IconButton
+                      icon="refresh-cw"
+                      label="Sync to Notion"
+                      size="sm"
+                      onClick={() => void sync()}
+                      disabled={saving}
+                    />
+                  ) : null}
+                </div>
+                <p
+                  style={{
+                    margin: '0 0 24px',
+                    maxWidth: '710px',
+                    font: 'var(--weight-regular) var(--text-base)/1.45 var(--font-sans)',
+                    letterSpacing: 'var(--tracking-tight)',
+                    color: 'var(--text-muted)'
+                  }}
+                >
+                  Replies are read aloud while voice mode is on, and only then — talking over one
+                  stops it. Code blocks and tables are skipped rather than spelled out.
+                </p>
+
+                <h3
+                  style={{
+                    margin: '0 0 4px',
+                    font: 'var(--weight-medium) var(--text-base)/1.3 var(--font-sans)',
+                    letterSpacing: 'var(--tracking-tight)',
+                    color: 'var(--text-primary)'
+                  }}
+                >
+                  Voice
+                </h3>
+                <p
+                  style={{
+                    margin: '0 0 16px',
+                    maxWidth: '710px',
+                    font: 'var(--weight-regular) var(--text-sm)/1.45 var(--font-sans)',
+                    letterSpacing: 'var(--tracking-tight)',
+                    color: 'var(--text-muted)'
+                  }}
+                >
+                  The voices Windows has installed. Left automatic, an English one is preferred over
+                  the system default, which on this machine reads English in a Polish accent.
+                </p>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '18px', maxWidth: '710px' }}>
+                  <select
+                    value={draft.speechVoice}
+                    onChange={(e) => setDraft((d) => ({ ...d, speechVoice: e.target.value }))}
+                    disabled={loading || failed || voices.length === 0}
+                    aria-label="Voice for spoken replies"
+                    style={{
+                      flex: '1 1 auto',
+                      minWidth: 0,
+                      boxSizing: 'border-box',
+                      padding: '8px 10px',
+                      background: 'var(--surface-control)',
+                      color: 'var(--text-body)',
+                      border: '1px solid var(--border-default)',
+                      borderRadius: 'var(--radius-md)',
+                      font: 'var(--weight-regular) var(--text-base)/1.2 var(--font-sans)',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    <option value="">
+                      {voices.length === 0
+                        ? 'No speech voices reported'
+                        : 'Automatic — prefers an English voice'}
+                    </option>
+                    {voiceMissing ? (
+                      <option value={draft.speechVoice}>
+                        {draft.speechVoice} — not installed on this machine
+                      </option>
+                    ) : null}
+                    {voices.map((voice) => (
+                      <option key={voice.name} value={voice.name}>
+                        {voice.name} — {voice.lang}
+                      </option>
+                    ))}
+                  </select>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      speakNow('Reading replies aloud at this rate.', {
+                        voiceName: draft.speechVoice,
+                        rate: draft.speechRate
+                      })
+                    }
+                    disabled={loading || failed}
+                    style={{
+                      flex: '0 0 auto',
+                      padding: '8px 14px',
+                      background: 'var(--surface-control)',
+                      color: 'var(--text-body)',
+                      border: '1px solid var(--border-default)',
+                      borderRadius: 'var(--radius-md)',
+                      font: 'var(--weight-medium) var(--text-base)/1.2 var(--font-sans)',
+                      cursor: 'pointer'
+                    }}
+                  >
+                    Test
+                  </button>
+                </div>
+
+                <h3
+                  style={{
+                    margin: '32px 0 4px',
+                    font: 'var(--weight-medium) var(--text-base)/1.3 var(--font-sans)',
+                    letterSpacing: 'var(--tracking-tight)',
+                    color: 'var(--text-primary)'
+                  }}
+                >
+                  Reading speed
+                </h3>
+
+                <div style={{ display: 'flex', alignItems: 'center', gap: '18px', maxWidth: '710px' }}>
+                  <input
+                    type="range"
+                    min={MIN_SPEECH_RATE}
+                    max={MAX_SPEECH_RATE}
+                    step={0.05}
+                    value={draft.speechRate}
+                    onChange={(e) => setDraft((d) => ({ ...d, speechRate: Number(e.target.value) }))}
+                    disabled={loading || failed}
+                    aria-label="Reading speed"
+                    style={{ flex: '1 1 auto', accentColor: '#E6E5E2', cursor: 'pointer' }}
+                  />
+                  <span
+                    style={{
+                      flex: '0 0 auto',
+                      minWidth: '92px',
+                      textAlign: 'right',
+                      font: 'var(--weight-medium) var(--text-base)/1 var(--font-mono)',
+                      letterSpacing: 'var(--tracking-tight)',
+                      color: 'var(--text-body)'
+                    }}
+                  >
+                    {draft.speechRate.toFixed(2)}&times;
+                  </span>
+                </div>
+                <div
+                  style={{
+                    display: 'flex',
+                    justifyContent: 'space-between',
+                    maxWidth: '710px',
+                    marginTop: '8px',
+                    paddingRight: '110px',
+                    font: 'var(--type-meta)',
+                    letterSpacing: 'var(--tracking-tight)',
+                    color: 'var(--text-faint)'
+                  }}
+                >
+                  <span>Half speed</span>
+                  <span>Double speed</span>
+                </div>
+
+                <p
+                  style={{
+                    margin: '32px 0 0',
+                    maxWidth: '710px',
+                    font: 'var(--weight-regular) var(--text-sm)/1.45 var(--font-sans)',
+                    letterSpacing: 'var(--tracking-tight)',
+                    color: 'var(--text-faint)'
+                  }}
+                >
+                  Voice mode is switched on and off by saying “hey livekit”, or by the button in the
+                  composer. It stays on after a message is sent, so the next thing said goes into the
+                  composer in turn.
+                </p>
               </>
             ) : (
               <>

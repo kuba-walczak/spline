@@ -65,13 +65,23 @@ import {
   deleteContextFolder,
   updateProjectTitle
 } from './services/NotionService'
-import { startWakeWordListener, stopWakeWordListener } from './services/WakeWordService'
-
-/** Voice runs as its own long-lived chat so spoken turns keep context with each other, and
-    never with whatever chat happens to be open in the window. Fixed so it resumes across runs. */
-const WAKE_WORD_SESSION_ID = '6d1f0c8a-4b7e-4d21-9f3a-2c5e8b0a71d4'
+import {
+  startWakeWordListener,
+  stopWakeWordListener,
+  setVoiceListening,
+  setVoiceMeter,
+  setVoiceConfig
+} from './services/WakeWordService'
+import type { VoiceEvent } from '../shared/voice'
 
 let chatWindow: BrowserWindow | null = null
+
+/* The renderer owns the voice mode - it is what the buttons show and what the wake word toggles -
+   so these two are a mirror of it, kept for the moments the renderer cannot speak for itself: a
+   reload, a closed window, a worker that died. Something has to switch the listener off then, and
+   it cannot be the side that just went away. */
+let voiceListening = false
+let voiceAvailable = false
 
 function loadRenderer(window: BrowserWindow, page: string): void {
   if (is.dev && process.env['ELECTRON_RENDERER_URL']) {
@@ -142,12 +152,23 @@ function createChatWindow(): BrowserWindow {
   chatWindow.once('ready-to-show', () => chatWindow?.show())
   chatWindow.on('closed', () => {
     chatWindow = null
+    forceVoiceOff()
+  })
+  /* Fires on the first load and on every reload after it, which makes it the one place that means
+     "the renderer is new": it has no voice mode yet, so the listener must not still be in one. */
+  chatWindow.webContents.on('did-finish-load', () => {
+    voiceListening = false
+    setVoiceListening(false)
+    setVoiceMeter(false)
+    void setLedStripSolidColor(0, 0, 0)
+    pushVoiceStatus()
   })
   chatWindow.webContents.on('console-message', (_event, level, message, line, sourceId) => {
     console.log(`[chatWindow console:${level}] ${message} (${sourceId}:${line})`)
   })
   chatWindow.webContents.on('render-process-gone', (_event, details) => {
     console.error('[chatWindow] render process gone:', details)
+    forceVoiceOff()
   })
 
   chatWindow.webContents.on('before-input-event', (_event, input) => {
@@ -161,23 +182,43 @@ function createChatWindow(): BrowserWindow {
   return chatWindow
 }
 
+/* Dropped when there is no window: voice mode types into the composer, so with it gone there is
+   nowhere for a wake word to land. Opening the window on hearing one would be a surprise rather
+   than a convenience. */
+function sendVoiceEvent(event: VoiceEvent): void {
+  chatWindow?.webContents.send('voice:event', event)
+}
+
+function pushVoiceStatus(): void {
+  sendVoiceEvent({ kind: 'status', listening: voiceListening, available: voiceAvailable })
+}
+
+/** Switches the listener off when the side that asked for it is no longer there to switch it off
+    itself, and says so, so the renderer that comes back does not think it is still listening. */
+function forceVoiceOff(): void {
+  if (!voiceListening) return
+  voiceListening = false
+  setVoiceListening(false)
+  setVoiceMeter(false)
+  void setLedStripSolidColor(0, 0, 0)
+  pushVoiceStatus()
+}
+
 function startWakeWord(): void {
   startWakeWordListener({
-    onWake: () => {
-      void setLedStripSolidColor(255, 0, 0)
+    onReady: () => {
+      voiceAvailable = true
+      pushVoiceStatus()
     },
-    onTranscript: async (text) => {
-      try {
-        if (text.trim()) {
-          console.log(text)
-          const result = await askClaude(WAKE_WORD_SESSION_ID, text)
-          console.log(result)
-        }
-      } catch (error) {
-        console.error('[wakeword] askClaude failed:', error)
-      } finally {
-        await setLedStripSolidColor(0, 0, 0)
-      }
+    onWake: () => sendVoiceEvent({ kind: 'wake' }),
+    onLevel: (db) => sendVoiceEvent({ kind: 'level', db }),
+    onSegment: (text) => sendVoiceEvent({ kind: 'segment', text }),
+    onSilence: () => sendVoiceEvent({ kind: 'silence' }),
+    onExit: () => {
+      voiceAvailable = false
+      voiceListening = false
+      void setLedStripSolidColor(0, 0, 0)
+      pushVoiceStatus()
     }
   })
 }
@@ -215,6 +256,11 @@ app.whenReady().then(() => {
 
   createChatWindow()
   startWakeWord()
+  /* After, and unawaited: the mic and both models start on the defaults compiled into the listener,
+     so a slow or unreachable Notion delays a threshold rather than the whole feature. */
+  void fetchConfig()
+    .then((config) => setVoiceConfig(config.voiceSilenceDb, config.voiceSilenceMs))
+    .catch((error) => console.error('[wakeword] could not read voice settings:', error))
 
   app.on('activate', function () {
     if (BrowserWindow.getAllWindows().length === 0) {
@@ -238,6 +284,26 @@ app.on('before-quit', async () => {
 ipcMain.on('setIgnoreMouseEvents', (event: IpcMainEvent, ignore: boolean) => {
   const window = BrowserWindow.fromWebContents(event.sender)
   window?.setIgnoreMouseEvents(ignore, { forward: true })
+})
+
+/* Only the chat window may steer the listener: it is the one that owns the mode, and a message
+   from anywhere else would be setting a state nothing is showing. */
+function fromChatWindow(event: IpcMainEvent): boolean {
+  return chatWindow !== null && !chatWindow.isDestroyed() && event.sender === chatWindow.webContents
+}
+
+ipcMain.on('voice:setListening', (event: IpcMainEvent, on: boolean) => {
+  if (!fromChatWindow(event)) return
+  voiceListening = on
+  setVoiceListening(on)
+  /* The strip is driven from here rather than the renderer because the forced-off paths above run
+     here too, and a listening light that only one of the two can turn off gets left on. */
+  void setLedStripSolidColor(on ? 255 : 0, 0, 0)
+})
+
+ipcMain.on('voice:setMeter', (event: IpcMainEvent, on: boolean) => {
+  if (!fromChatWindow(event)) return
+  setVoiceMeter(on)
 })
 
 ipcMain.handle('setRgbColor', async (_event, r: number, g: number, b: number) => {
@@ -519,4 +585,7 @@ ipcMain.handle('notion:getConfig', async () => {
 
 ipcMain.handle('notion:saveConfig', async (_event, config: AppConfig) => {
   await saveConfig(config)
+  /* Reaches the running listener directly: a threshold is worth nothing until the thing measuring
+     against it has been told, and it should not take a restart. */
+  setVoiceConfig(config.voiceSilenceDb, config.voiceSilenceMs)
 })
