@@ -1,5 +1,6 @@
 import 'dotenv/config'
 import { readSessionTranscript } from './SessionTranscript'
+import { pullTranscript } from './TranscriptSync'
 import { CONTEXT_SEPARATOR } from '../../shared/injection'
 import { folderByItemId, folderMemberIds, folderName, folderTitle, isFolderTitle } from '../../shared/context'
 import type { ContextFolder } from '../../shared/context'
@@ -197,6 +198,118 @@ export async function fetchChatLog(): Promise<ChatLogEntry[]> {
 /** Records which CLI session backs a chat — the id the app passes to `--resume` to continue it. */
 export async function setChatSessionId(pageId: string, sessionId: string): Promise<void> {
     await patchPage(pageId, { 'Session ID': await scalarPayload('Session ID', sessionId) }, 'session id')
+}
+
+const TRANSCRIPT_PROPERTY = 'Transcript'
+
+/** A chat row's attached transcript. `name` and `url` are null when nothing is attached yet. */
+export interface ChatTranscriptRef {
+    pageId: string
+    sessionId: string
+    name: string | null
+    /** Signed and short-lived (about an hour), so it is read fresh right before each download. */
+    url: string | null
+}
+
+let warnedNoTranscriptProperty = false
+
+/** Whether the Chats data source has a files column to hold transcripts. Without it sync is off
+    rather than failing every turn. */
+async function transcriptsSupported(): Promise<boolean> {
+    if ((await fetchPropertyTypes())[TRANSCRIPT_PROPERTY] === 'files') return true
+    if (!warnedNoTranscriptProperty) {
+        warnedNoTranscriptProperty = true
+        console.warn(`[notion] Chats has no "${TRANSCRIPT_PROPERTY}" files property; transcript sync is off`)
+    }
+    return false
+}
+
+function transcriptRef(page: NotionPage): ChatTranscriptRef | null {
+    const sessionId = scalarProperty(page, 'Session ID')
+    if (!sessionId) return null
+    const prop = page.properties[TRANSCRIPT_PROPERTY] as
+        | { files?: Array<{ name?: string; file?: { url: string }; external?: { url: string } }> }
+        | undefined
+    const file = prop?.files?.[0]
+    return {
+        pageId: page.id,
+        sessionId,
+        name: file?.name ?? null,
+        url: file?.file?.url ?? file?.external?.url ?? null
+    }
+}
+
+/** The transcript attached to the chat backed by `sessionId`, or null when there is no such row or
+    sync is off. */
+export async function findChatTranscript(sessionId: string): Promise<ChatTranscriptRef | null> {
+    if (!(await transcriptsSupported())) return null
+    const type = (await fetchPropertyTypes())['Session ID']
+    const filter =
+        type === 'select'
+            ? { property: 'Session ID', select: { equals: sessionId } }
+            : type === 'title'
+              ? { property: 'Session ID', title: { equals: sessionId } }
+              : { property: 'Session ID', rich_text: { equals: sessionId } }
+
+    const res = await fetch(`https://api.notion.com/v1/data_sources/${CHATS_DATA_SOURCE_ID}/query`, {
+        method: 'POST',
+        headers: headers(),
+        body: JSON.stringify({ filter, page_size: 1 })
+    })
+    if (!res.ok) throw new Error(`Notion transcript lookup failed: ${res.status} ${await res.text()}`)
+
+    const data = (await res.json()) as { results: NotionPage[] }
+    return data.results[0] ? transcriptRef(data.results[0]) : null
+}
+
+/** Every chat row that has a session, with whatever transcript it carries. */
+export async function listChatTranscripts(): Promise<ChatTranscriptRef[]> {
+    if (!(await transcriptsSupported())) return []
+    const refs: ChatTranscriptRef[] = []
+    let cursor: string | undefined
+    do {
+        const res = await fetch(`https://api.notion.com/v1/data_sources/${CHATS_DATA_SOURCE_ID}/query`, {
+            method: 'POST',
+            headers: headers(),
+            body: JSON.stringify({ page_size: 100, ...(cursor ? { start_cursor: cursor } : {}) })
+        })
+        if (!res.ok) throw new Error(`Notion transcript list failed: ${res.status} ${await res.text()}`)
+        const data = (await res.json()) as { results: NotionPage[]; has_more: boolean; next_cursor: string | null }
+        for (const page of data.results) {
+            const ref = transcriptRef(page)
+            if (ref) refs.push(ref)
+        }
+        cursor = data.has_more ? (data.next_cursor ?? undefined) : undefined
+    } while (cursor)
+    return refs
+}
+
+/** Uploads `bytes` as a file and makes it the chat row's only transcript attachment. */
+export async function attachChatTranscript(pageId: string, fileName: string, bytes: Buffer): Promise<void> {
+    const createRes = await fetch('https://api.notion.com/v1/file_uploads', {
+        method: 'POST',
+        headers: headers(),
+        body: JSON.stringify({ mode: 'single_part', filename: fileName, content_type: 'text/plain' })
+    })
+    if (!createRes.ok) throw new Error(`Notion file upload create failed: ${createRes.status} ${await createRes.text()}`)
+    const { id } = (await createRes.json()) as { id: string }
+
+    const form = new FormData()
+    form.append('file', new Blob([new Uint8Array(bytes)], { type: 'text/plain' }), fileName)
+    /* The JSON content type from `headers()` has to go: fetch sets the multipart one, boundary included. */
+    const { 'Content-Type': _json, ...sendHeaders } = headers()
+    const sendRes = await fetch(`https://api.notion.com/v1/file_uploads/${id}/send`, {
+        method: 'POST',
+        headers: sendHeaders,
+        body: form
+    })
+    if (!sendRes.ok) throw new Error(`Notion file upload send failed: ${sendRes.status} ${await sendRes.text()}`)
+
+    await patchPage(
+        pageId,
+        { [TRANSCRIPT_PROPERTY]: { files: [{ type: 'file_upload', file_upload: { id }, name: fileName }] } },
+        'transcript'
+    )
 }
 
 interface NotionBlock {
@@ -1506,8 +1619,10 @@ export async function fetchProjectContext(projectId: string, excludeSessionId?: 
     /* The chat this context is being assembled for is left out of it. Continuing a chat resumes its
        session, so the CLI already holds the conversation; injecting it as well would send every turn
        twice, and under a heading that calls the turn still being answered "already answered". */
-    const chatTexts = detail.chats
-        .filter((chat) => !(excludeSessionId && chat.sessionId === excludeSessionId))
+    const includedChats = detail.chats.filter((chat) => !(excludeSessionId && chat.sessionId === excludeSessionId))
+    /* A chat started on another machine has no transcript here until it is pulled. */
+    await Promise.all(includedChats.map((chat) => (chat.sessionId ? pullTranscript(chat.sessionId) : undefined)))
+    const chatTexts = includedChats
         .map((chat) => ({
             id: chat.id,
             title: chat.name || 'Untitled',

@@ -13,6 +13,7 @@ import {
   stopSession
 } from './services/ClaudeService'
 import { readSessionContextTokens, readSessionTranscript } from './services/SessionTranscript'
+import { pullTranscript, schedulePush } from './services/TranscriptSync'
 import type { AppConfig } from '../shared/config'
 import type { SkillData } from '../shared/skills'
 import {
@@ -225,10 +226,12 @@ function startWakeWord(): void {
 
 claudeEvents.on('event', (payload) => {
   chatWindow?.webContents.send('claude:event', payload)
+  if (payload.event.type === 'result') schedulePush(payload.sessionId)
 })
 
 claudeEvents.on('status', (payload) => {
   chatWindow?.webContents.send('claude:status', payload)
+  if (payload.status === 'idle') schedulePush(payload.sessionId)
 })
 
 claudeEvents.on('debug', (payload) => {
@@ -337,6 +340,8 @@ ipcMain.handle('streamDeck:setBrightness', async (_event, percentage: number) =>
 ipcMain.handle(
   'askClaude',
   async (_event, sessionId: string, prompt: string, model: string, effort: string, systemPrompt: string) => {
+    /* Before the spawn: `ensureSession` picks `--resume` only if the transcript is on disk. */
+    await pullTranscript(sessionId)
     return askClaude(sessionId, prompt, model, effort, systemPrompt)
   }
 )
@@ -356,8 +361,9 @@ ipcMain.handle(
   }
 )
 
-ipcMain.handle('claude:readContextTokens', (_event, sessionId: string) => {
+ipcMain.handle('claude:readContextTokens', async (_event, sessionId: string) => {
   try {
+    await pullTranscript(sessionId)
     return readSessionContextTokens(sessionId)
   } catch (error) {
     console.error('[main] claude:readContextTokens failed:', error)
@@ -365,8 +371,9 @@ ipcMain.handle('claude:readContextTokens', (_event, sessionId: string) => {
   }
 })
 
-ipcMain.handle('claude:readTranscript', (_event, sessionId: string) => {
+ipcMain.handle('claude:readTranscript', async (_event, sessionId: string) => {
   try {
+    await pullTranscript(sessionId)
     return readSessionTranscript(sessionId)
   } catch (error) {
     console.error('[main] claude:readTranscript failed:', error)
