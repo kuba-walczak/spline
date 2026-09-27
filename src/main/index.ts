@@ -341,7 +341,7 @@ ipcMain.handle(
   'askClaude',
   async (_event, sessionId: string, prompt: string, model: string, effort: string, systemPrompt: string) => {
     /* Before the spawn: `ensureSession` picks `--resume` only if the transcript is on disk. */
-    await pullTranscript(sessionId)
+    await pullTranscript(sessionId, true)
     return askClaude(sessionId, prompt, model, effort, systemPrompt)
   }
 )

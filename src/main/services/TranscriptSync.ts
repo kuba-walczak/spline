@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { dirname } from 'node:path'
 import { sessionFilePath } from './SessionTranscript'
-import { getSessionStatuses } from './ClaudeService'
+import { getSessionStatuses, isSessionBusy, stopSession } from './ClaudeService'
 import {
     attachChatTranscript,
     findChatTranscript,
@@ -37,9 +37,11 @@ function localBytes(sessionId: string): number {
 const lastPulled = new Map<string, number>()
 const pullsInFlight = new Map<string, Promise<void>>()
 
-async function doPull(sessionId: string): Promise<void> {
-    /* A running process is appending to the file right now; the local copy is the newest there is. */
-    if (sessionId in getSessionStatuses()) return
+async function doPull(sessionId: string, beforeSend: boolean): Promise<void> {
+    const running = (): boolean => sessionId in getSessionStatuses()
+    /* A process mid-turn is appending to the file right now. When not sending, a running process is
+       left alone too: it holds the conversation in memory and would write over a swapped file. */
+    if (running() && (!beforeSend || isSessionBusy(sessionId))) return
 
     const ref = await findChatTranscript(sessionId)
     if (!ref?.url || remoteBytes(ref) <= localBytes(sessionId)) return
@@ -47,8 +49,16 @@ async function doPull(sessionId: string): Promise<void> {
     const res = await fetch(ref.url)
     if (!res.ok) throw new Error(`transcript download failed: ${res.status}`)
     const bytes = Buffer.from(await res.arrayBuffer())
+    if (bytes.length <= localBytes(sessionId)) return
 
-    if (sessionId in getSessionStatuses() || bytes.length <= localBytes(sessionId)) return
+    /* Another device moved the chat on while this one's process sat idle with the old copy in
+       memory. Replying from it would fork the conversation and overwrite the other device's turns,
+       so it is ended and the send resumes from the newer file. */
+    if (running()) {
+        if (isSessionBusy(sessionId)) return
+        stopSession(sessionId)
+    }
+
     const path = sessionFilePath(sessionId)
     mkdirSync(dirname(path), { recursive: true })
     writeFileSync(path, bytes)
@@ -56,13 +66,15 @@ async function doPull(sessionId: string): Promise<void> {
 }
 
 /** Brings the local transcript up to the cloud copy if that one is newer. Never throws: offline,
-    the local file is simply what there is. */
-export async function pullTranscript(sessionId: string): Promise<void> {
+    the local file is simply what there is. `beforeSend` always checks, skipping the freshness
+    window, since a reply built on a stale copy is the one thing sync must not allow. */
+export async function pullTranscript(sessionId: string, beforeSend = false): Promise<void> {
     const inFlight = pullsInFlight.get(sessionId)
-    if (inFlight) return inFlight
-    if (Date.now() - (lastPulled.get(sessionId) ?? 0) < PULL_FRESH_MS) return
+    if (inFlight && !beforeSend) return inFlight
+    if (inFlight) await inFlight
+    if (!beforeSend && Date.now() - (lastPulled.get(sessionId) ?? 0) < PULL_FRESH_MS) return
 
-    const pull = doPull(sessionId)
+    const pull = doPull(sessionId, beforeSend)
         .then(() => {
             lastPulled.set(sessionId, Date.now())
         })
@@ -72,7 +84,11 @@ export async function pullTranscript(sessionId: string): Promise<void> {
     return pull
 }
 
+const PUSH_RETRY_MS = 15_000
+const PUSH_MAX_FAILURES = 5
+
 const lastPushed = new Map<string, number>()
+const pushFailures = new Map<string, number>()
 const pushTimers = new Map<string, NodeJS.Timeout>()
 const pushChains = new Map<string, Promise<void>>()
 
@@ -99,20 +115,30 @@ async function doPush(sessionId: string, known?: ChatTranscriptRef): Promise<voi
 function enqueuePush(sessionId: string, known?: ChatTranscriptRef): Promise<void> {
     const next = (pushChains.get(sessionId) ?? Promise.resolve())
         .then(() => doPush(sessionId, known))
-        .catch((error) => console.error(`[sync] push ${sessionId} failed:`, error))
+        .then(() => {
+            pushFailures.delete(sessionId)
+        })
+        .catch((error) => {
+            /* Left alone, a failed upload waits for the next turn, and the last turn of a
+               conversation would never make it up at all. */
+            const failures = (pushFailures.get(sessionId) ?? 0) + 1
+            pushFailures.set(sessionId, failures)
+            console.error(`[sync] push ${sessionId} failed (attempt ${failures}):`, error)
+            if (failures < PUSH_MAX_FAILURES) schedulePush(sessionId, PUSH_RETRY_MS * failures)
+        })
     pushChains.set(sessionId, next)
     return next
 }
 
 /** Uploads the transcript shortly after a turn, coalescing a burst of turns into one upload. */
-export function schedulePush(sessionId: string): void {
+export function schedulePush(sessionId: string, delay = PUSH_DEBOUNCE_MS): void {
     clearTimeout(pushTimers.get(sessionId))
     pushTimers.set(
         sessionId,
         setTimeout(() => {
             pushTimers.delete(sessionId)
             void enqueuePush(sessionId)
-        }, PUSH_DEBOUNCE_MS)
+        }, delay)
     )
 }
 

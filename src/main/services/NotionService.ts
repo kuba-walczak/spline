@@ -239,27 +239,66 @@ function transcriptRef(page: NotionPage): ChatTranscriptRef | null {
     }
 }
 
+/** `fetch` that rides out the failures a sync hits in normal use: 429 when a turn's other Notion
+    writes use up the rate limit, 409 when one of them edits the same row at the same moment, and
+    the odd 5xx or dropped connection. */
+async function fetchWithRetry(url: string, init: RequestInit, label: string): Promise<Response> {
+    const attempts = 5
+    const wait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms))
+    for (let attempt = 1; ; attempt++) {
+        const backoff = 500 * 2 ** (attempt - 1)
+        let res: Response
+        try {
+            res = await fetch(url, init)
+        } catch (error) {
+            if (attempt >= attempts) throw error
+            await wait(backoff)
+            continue
+        }
+        if (res.ok) return res
+
+        const retryable = res.status === 429 || res.status === 409 || res.status >= 500
+        if (!retryable || attempt >= attempts) {
+            throw new Error(`Notion ${label} failed: ${res.status} ${await res.text()}`)
+        }
+        const retryAfter = Number(res.headers.get('retry-after'))
+        await wait(retryAfter > 0 ? retryAfter * 1000 : backoff)
+    }
+}
+
+const chatPageIds = new Map<string, string>()
+
 /** The transcript attached to the chat backed by `sessionId`, or null when there is no such row or
-    sync is off. */
+    sync is off.
+
+    The query only finds the row. Its results come from an index that trails recent edits by
+    seconds, so the attachment itself is read from the page, which is always current. */
 export async function findChatTranscript(sessionId: string): Promise<ChatTranscriptRef | null> {
     if (!(await transcriptsSupported())) return null
-    const type = (await fetchPropertyTypes())['Session ID']
-    const filter =
-        type === 'select'
-            ? { property: 'Session ID', select: { equals: sessionId } }
-            : type === 'title'
-              ? { property: 'Session ID', title: { equals: sessionId } }
-              : { property: 'Session ID', rich_text: { equals: sessionId } }
 
-    const res = await fetch(`https://api.notion.com/v1/data_sources/${CHATS_DATA_SOURCE_ID}/query`, {
-        method: 'POST',
-        headers: headers(),
-        body: JSON.stringify({ filter, page_size: 1 })
-    })
-    if (!res.ok) throw new Error(`Notion transcript lookup failed: ${res.status} ${await res.text()}`)
+    let pageId = chatPageIds.get(sessionId)
+    if (!pageId) {
+        const type = (await fetchPropertyTypes())['Session ID']
+        const filter =
+            type === 'select'
+                ? { property: 'Session ID', select: { equals: sessionId } }
+                : type === 'title'
+                  ? { property: 'Session ID', title: { equals: sessionId } }
+                  : { property: 'Session ID', rich_text: { equals: sessionId } }
 
-    const data = (await res.json()) as { results: NotionPage[] }
-    return data.results[0] ? transcriptRef(data.results[0]) : null
+        const res = await fetchWithRetry(
+            `https://api.notion.com/v1/data_sources/${CHATS_DATA_SOURCE_ID}/query`,
+            { method: 'POST', headers: headers(), body: JSON.stringify({ filter, page_size: 1 }) },
+            'transcript lookup'
+        )
+        const data = (await res.json()) as { results: NotionPage[] }
+        if (!data.results[0]) return null
+        pageId = data.results[0].id
+        chatPageIds.set(sessionId, pageId)
+    }
+
+    const res = await fetchWithRetry(`https://api.notion.com/v1/pages/${pageId}`, { headers: headers() }, 'chat read')
+    return transcriptRef((await res.json()) as NotionPage)
 }
 
 /** Every chat row that has a session, with whatever transcript it carries. */
@@ -286,29 +325,39 @@ export async function listChatTranscripts(): Promise<ChatTranscriptRef[]> {
 
 /** Uploads `bytes` as a file and makes it the chat row's only transcript attachment. */
 export async function attachChatTranscript(pageId: string, fileName: string, bytes: Buffer): Promise<void> {
-    const createRes = await fetch('https://api.notion.com/v1/file_uploads', {
-        method: 'POST',
-        headers: headers(),
-        body: JSON.stringify({ mode: 'single_part', filename: fileName, content_type: 'text/plain' })
-    })
-    if (!createRes.ok) throw new Error(`Notion file upload create failed: ${createRes.status} ${await createRes.text()}`)
+    const createRes = await fetchWithRetry(
+        'https://api.notion.com/v1/file_uploads',
+        {
+            method: 'POST',
+            headers: headers(),
+            body: JSON.stringify({ mode: 'single_part', filename: fileName, content_type: 'text/plain' })
+        },
+        'file upload create'
+    )
     const { id } = (await createRes.json()) as { id: string }
 
     const form = new FormData()
     form.append('file', new Blob([new Uint8Array(bytes)], { type: 'text/plain' }), fileName)
     /* The JSON content type from `headers()` has to go: fetch sets the multipart one, boundary included. */
     const { 'Content-Type': _json, ...sendHeaders } = headers()
-    const sendRes = await fetch(`https://api.notion.com/v1/file_uploads/${id}/send`, {
-        method: 'POST',
-        headers: sendHeaders,
-        body: form
-    })
-    if (!sendRes.ok) throw new Error(`Notion file upload send failed: ${sendRes.status} ${await sendRes.text()}`)
+    await fetchWithRetry(
+        `https://api.notion.com/v1/file_uploads/${id}/send`,
+        { method: 'POST', headers: sendHeaders, body: form },
+        'file upload send'
+    )
 
-    await patchPage(
-        pageId,
-        { [TRANSCRIPT_PROPERTY]: { files: [{ type: 'file_upload', file_upload: { id }, name: fileName }] } },
-        'transcript'
+    await fetchWithRetry(
+        `https://api.notion.com/v1/pages/${pageId}`,
+        {
+            method: 'PATCH',
+            headers: headers(),
+            body: JSON.stringify({
+                properties: {
+                    [TRANSCRIPT_PROPERTY]: { files: [{ type: 'file_upload', file_upload: { id }, name: fileName }] }
+                }
+            })
+        },
+        'transcript attach'
     )
 }
 

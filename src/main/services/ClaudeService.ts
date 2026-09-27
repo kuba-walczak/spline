@@ -155,6 +155,11 @@ export function getSessionStatuses(): Record<string, SessionStatus> {
     return Object.fromEntries([...sessions].map(([id, s]) => [id, s.booting ? 'booting' : 'ready']))
 }
 
+/** Whether a chat's process is mid-turn — replacing it now would drop the reply in flight. */
+export function isSessionBusy(sessionId: string): boolean {
+    return (sessions.get(sessionId)?.queue.length ?? 0) > 0
+}
+
 /* Appended context travels as a file rather than as an argument. The CLI reads it at spawn — a
    rewrite under a live process changes nothing until that process is replaced, which is exactly
    the refresh model the app wants. One file per chat, so concurrent sessions cannot overwrite
