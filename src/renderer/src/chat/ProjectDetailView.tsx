@@ -566,7 +566,12 @@ function AddContextMenu({
     kind === 'chat' ? chats : kind === 'person' ? people : pages
   const panelStyle: CSSProperties = {
     zIndex: 61,
-    padding: 'var(--space-2)',
+    /* Taller than it is wide, because the panel is rounded: at an even 4px the corner arc cut
+       inside the first and last rows, and a hovered row at either end read as sitting flush
+       against the border with no gap at all. The vertical padding clears the radius instead. The
+       horizontal stays 4px — the rows carry 8px of their own, and the divider below bleeds to the
+       edge by exactly that much. */
+    padding: 'var(--space-3) var(--space-2)',
     boxSizing: 'border-box',
     background: '#20201F',
     border: '1px solid var(--border-default)',

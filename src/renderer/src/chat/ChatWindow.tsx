@@ -8,6 +8,7 @@ import { ProjectContextModal } from './ProjectContextModal'
 import { InjectionModal } from '@/components/ui/injection-modal'
 import { loadActiveSkills, saveActiveSkills } from '@/lib/activeSkills'
 import { cancelSpeech, endSpeechTurn, feedSpeech, setSpeechOptions } from '@/lib/speech'
+import { messageBlocks, type InlineSegment } from '@/lib/messageFormat'
 import { loadTitleLocks, saveTitleLock } from '@/lib/titleLock'
 import { usageFromEvent } from '@shared/tokenUsage'
 import ProjectDetailView from './ProjectDetailView'
@@ -211,6 +212,49 @@ const ROW_GAP = 12
 const GROUP_GAP = 6
 const REPLY_GAP = 20
 const OUTPUT_INDENT = HEADER_PAD_X + TOOL_ICON_SIZE + HEADER_GAP
+
+/* A heading in a reply is a signpost over a few paragraphs, not a title for a page, so the scale
+   starts just above the bubble's own 15px body and stays there. `--text-title` is what a page
+   heading uses and would be shouting in a chat.
+
+   The 16px step in the middle is the one size here with no token: the scale jumps 15 → 18 → 26, and
+   three heading levels need a rung between the first two. The outer two are tokens. */
+const HEADING_SIZE: Record<1 | 2 | 3, string> = {
+    1: 'var(--text-lg)',
+    2: '16px',
+    3: 'var(--text-md)'
+}
+
+/** How a heading of `level` is drawn. `first` drops the space above: a reply that opens with a
+    heading would otherwise start with a gap the bubble has nothing to sit against. */
+function headingStyle(level: 1 | 2 | 3, first: boolean): CSSProperties {
+  return {
+    /* `display: block` inside a `pre-wrap` bubble is what ends the line either side of it, which is
+       why the parser can drop the newlines that used to do that job. */
+    fontFamily: 'var(--font-sans)',
+    fontSize: HEADING_SIZE[level],
+    fontWeight: 'var(--weight-semibold)',
+    lineHeight: 'var(--leading-snug)',
+    letterSpacing: 'var(--tracking-tight)',
+    color: '#FFFFFF',
+    /* Asymmetric on purpose: a heading belongs to what comes after it, so it sits nearer the text
+       it introduces than the text it follows. */
+    margin: first ? '0 0 var(--space-3)' : 'var(--space-7) 0 var(--space-3)'
+  }
+}
+
+/** One block's inline runs: the bold ones in a `strong`, the rest as they were written. */
+function renderSegments(segments: InlineSegment[]): ReactElement[] {
+  return segments.map((segment, index) =>
+    segment.bold ? (
+      <strong key={index} style={{ fontWeight: 600 }}>
+        {segment.text}
+      </strong>
+    ) : (
+      <span key={index}>{segment.text}</span>
+    )
+  )
+}
 
 
 /** Bare host, so a row reads "Demographics of Poland — en.wikipedia.org" rather than a full URL. */
@@ -2109,7 +2153,19 @@ export default function ChatWindow({
         continue
       }
 
-      rendered.push(<span key={i}>{part.text}</span>)
+      rendered.push(
+        <span key={i}>
+          {messageBlocks(part.text).map((block, index) =>
+            block.kind === 'heading' ? (
+              <div key={index} style={headingStyle(block.level, index === 0)}>
+                {renderSegments(block.segments)}
+              </div>
+            ) : (
+              <span key={index}>{renderSegments(block.segments)}</span>
+            )
+          )}
+        </span>
+      )
       i++
     }
     return rendered

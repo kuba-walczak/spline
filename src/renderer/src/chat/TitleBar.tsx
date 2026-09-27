@@ -64,7 +64,7 @@ export function TitleBar({
         {title ? (
           <span
             style={{
-              font: 'var(--weight-medium) var(--text-base)/1.2 var(--font-sans)',
+              font: 'var(--weight-medium) var(--text-base)/var(--leading-snug) var(--font-sans)',
               letterSpacing: 'var(--tracking-tight)',
               color: muted ? 'var(--text-faint)' : 'var(--text-primary)',
               whiteSpace: 'nowrap',

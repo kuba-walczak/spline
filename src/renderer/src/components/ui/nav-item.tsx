@@ -108,7 +108,20 @@ export function NavItem({
       }}
     >
       {leading ?? (icon ? glyph : null)}
-      <span style={{ flex: '1 1 auto', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+      {/* The row's own `line-height: 1` is what centres the icon and badge against a fixed row
+          height, but a 1em line box on a 1em font has no room under the baseline — and this span
+          has to clip, because clipping is what draws the ellipsis. So the descenders of a `y` or a
+          `g` were cut off flat. The label gets a line box taller than its glyphs instead; the row
+          is a fixed height and centres it, so nothing moves. */}
+      <span
+        style={{
+          flex: '1 1 auto',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+          whiteSpace: 'nowrap',
+          lineHeight: 'var(--leading-normal)'
+        }}
+      >
         {label}
       </span>
       {badge ? <Badge variant="bare">{badge}</Badge> : null}

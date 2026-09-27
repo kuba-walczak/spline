@@ -292,7 +292,9 @@ function RowMenu({ onDismiss, children }: { onDismiss: () => void; children: Rea
           right: 4,
           zIndex: 11,
           minWidth: 140,
-          padding: 'var(--space-2)',
+          /* Clears the corner radius the way the add-context menu's panel does — an even 4px is
+             less than the 8px arc, and the first and last rows lost their gap to it. */
+          padding: 'var(--space-3) var(--space-2)',
           background: '#20201F',
           border: '1px solid var(--border-default)',
           borderRadius: 'var(--radius-md)',
