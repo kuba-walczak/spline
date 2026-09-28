@@ -117,7 +117,7 @@ const UNTITLED = 'New chat'
 
 const MODELS = [
   { id: 'claude-opus-5-5', name: 'Opus 5.5' },
-  { id: 'sonnet', name: 'Sonnet 5' },
+  { id: 'claude-sonnet-5-5', name: 'Sonnet 5.5' },
   { id: 'haiku', name: 'Haiku 4.5' }
 ]
 
@@ -131,10 +131,17 @@ const EFFORTS = [
 const DEFAULT_EFFORT_ID = 'high'
 const DEFAULT_MODEL_ID = 'claude-opus-5-5'
 
-/** A chat saved on a model the picker no longer offers opens on the default. Opus 5 used to be
-    that default, and its id is still on those rows. */
+/** Ids the picker used to offer, and what they open as now. Opus 5 was the old default, so a row
+    with no model still lands on Opus 5.5 through the fallback below. */
+const REPLACED_MODELS: Record<string, string> = {
+  opus: 'claude-opus-5-5',
+  sonnet: 'claude-sonnet-5-5'
+}
+
+/** A chat saved on a model the picker no longer offers opens on its replacement, or the default. */
 function modelOrDefault(id: string | null | undefined): string {
-  return id && MODELS.some((m) => m.id === id) ? id : DEFAULT_MODEL_ID
+  if (!id) return DEFAULT_MODEL_ID
+  return REPLACED_MODELS[id] ?? (MODELS.some((m) => m.id === id) ? id : DEFAULT_MODEL_ID)
 }
 /** Between the pieces of an assembled system prompt. */
 const SECTION_BREAK = String.fromCharCode(10, 10)
