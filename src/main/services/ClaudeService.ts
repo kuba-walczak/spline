@@ -137,7 +137,7 @@ interface Session {
 }
 
 /** Used for chats whose row carries no preference yet, and for the voice session, which has no row. */
-export const DEFAULT_MODEL = 'opus'
+export const DEFAULT_MODEL = 'claude-opus-5-5'
 export const DEFAULT_EFFORT = 'high'
 
 /** One live CLI process per chat, keyed by the chat's session id. Processes stay up until the

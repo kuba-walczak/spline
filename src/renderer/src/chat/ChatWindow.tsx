@@ -116,7 +116,7 @@ interface Project {
 const UNTITLED = 'New chat'
 
 const MODELS = [
-  { id: 'opus', name: 'Opus 5' },
+  { id: 'claude-opus-5-5', name: 'Opus 5.5' },
   { id: 'sonnet', name: 'Sonnet 5' },
   { id: 'haiku', name: 'Haiku 4.5' }
 ]
@@ -129,7 +129,13 @@ const EFFORTS = [
   { id: 'max', name: 'Max' }
 ]
 const DEFAULT_EFFORT_ID = 'high'
-const DEFAULT_MODEL_ID = 'opus'
+const DEFAULT_MODEL_ID = 'claude-opus-5-5'
+
+/** A chat saved on a model the picker no longer offers opens on the default. Opus 5 used to be
+    that default, and its id is still on those rows. */
+function modelOrDefault(id: string | null | undefined): string {
+  return id && MODELS.some((m) => m.id === id) ? id : DEFAULT_MODEL_ID
+}
 /** Between the pieces of an assembled system prompt. */
 const SECTION_BREAK = String.fromCharCode(10, 10)
 
@@ -920,7 +926,7 @@ export default function ChatWindow({
                 messages: existing?.messages ?? [],
                 loaded: existing?.loaded,
                 sessionId: entry.sessionId ?? '',
-                model: entry.model ?? DEFAULT_MODEL_ID,
+                model: modelOrDefault(entry.model),
                 effort: entry.effort ?? DEFAULT_EFFORT_ID,
                 sourceId: entry.id,
                 /* From the map rather than the row: membership is recorded on the project now, and
@@ -1909,7 +1915,7 @@ export default function ChatWindow({
     /* The pickers follow the chat, so reopening one restores the model and effort it was using. */
     const chat = allConversations.find((c) => c.id === id)
     if (chat) {
-      setModelId(chat.model || DEFAULT_MODEL_ID)
+      setModelId(modelOrDefault(chat.model))
       setEffortId(chat.effort || DEFAULT_EFFORT_ID)
       /* The chips are the only place an attachment is shown, so they have to follow the chat too —
          they are its live set, not a staging area for the next message. */
